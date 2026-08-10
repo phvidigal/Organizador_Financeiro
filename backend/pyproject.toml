@@ -1,0 +1,28 @@
+# Apenas configuração de ferramentas. As dependências ficam em requirements.txt
+# (ver o comentário no topo daquele arquivo).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Fixtures e testes precisam compartilhar o MESMO event loop, senão o asyncpg
+# quebra com "attached to a different loop": as engines vivem no loop da sessão e
+# o teste rodaria num loop novo.
+#
+# Isto cobre as fixtures. Do lado dos testes não há opção equivalente no
+# pytest-asyncio 0.25 — o escopo vem do marcador, aplicado via `pytestmark` no
+# topo de cada módulo de teste.
+asyncio_default_fixture_loop_scope = "session"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# B008 proíbe chamada de função em valor default de argumento. É exatamente como
+# o FastAPI declara dependências (`= Depends(...)`), então a regra só produziria
+# falso positivo neste projeto.
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]

@@ -1,0 +1,19 @@
+# Dependências de runtime.
+# Ficam aqui e não em pyproject.toml porque a app não é instalada como pacote:
+# o código vem do bind mount em /app. Instalar via `pip install .` criaria uma
+# segunda cópia em site-packages e o --reload passaria a editar o arquivo errado.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# SQLAlchemy 2.0 (estilo declarativo novo, com Mapped/mapped_column).
+SQLAlchemy[asyncio]==2.0.36
+asyncpg==0.30.0           # driver assíncrono, usado pela aplicação
+psycopg[binary]==3.2.3    # driver síncrono, usado só pelo Alembic
+alembic==1.14.0
+
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+cryptography==44.0.0      # Fernet — criptografia em repouso (Fase 5)
+httpx==0.28.1             # cliente HTTP (Pluggy na Fase 2, Ollama na Fase 3)

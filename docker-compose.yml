@@ -1,0 +1,85 @@
+name: organizador-financeiro
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-finance}
+      APP_DB_USER: ${APP_DB_USER:-app_user}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-app_user}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Cria o role app_user no primeiro boot (ver o cabeçalho do script).
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -U/-d explícitos: sem eles o pg_isready usa o usuário `root` do container
+      # e reporta "ready" antes de o initdb terminar de criar o banco da aplicação.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-finance}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    environment:
+      # Sobrescreve o .env: dentro da rede do compose o host do Postgres é `db`,
+      # mesmo que o .env aponte para localhost (caso de quem roda fora do Docker).
+      #
+      # A aplicação conecta como app_user (sujeito ao RLS) e o Alembic como owner
+      # (que ignora RLS e pode criar tabelas). Ver a nota no .env.example.
+      DATABASE_URL: postgresql+asyncpg://${APP_DB_USER:-app_user}:${APP_DB_PASSWORD:-app_user}@db:5432/${POSTGRES_DB:-finance}
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-finance}
+      # A suíte conecta como owner para criar/derrubar o banco de teste, e abre
+      # uma segunda conexão como app_user para exercitar o RLS de verdade.
+      TEST_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-finance}_test
+      TEST_APP_DATABASE_URL: postgresql+asyncpg://${APP_DB_USER:-app_user}:${APP_DB_PASSWORD:-app_user}@db:5432/${POSTGRES_DB:-finance}_test
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    extra_hosts:
+      # Necessário no Docker Engine (Linux) para alcançar o Ollama do host.
+      # No Docker Desktop (Windows/macOS) host.docker.internal já existe; repetir é inofensivo.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/live').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # Chamadas server-side (React Server Components) saem de dentro da rede do
+      # compose, onde `localhost` seria o próprio container do frontend.
+      INTERNAL_API_URL: http://backend:8000
+      WATCHPACK_POLLING: "true"  # hot reload através de bind mount vindo do Windows
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      # Volume anônimo: sem ele o bind mount do host (que não tem node_modules)
+      # esconderia os módulos instalados na imagem e o `next dev` não sobe.
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  pgdata:
