@@ -147,6 +147,12 @@ legacy/      Protótipo SQLite original, apenas como referência
 - [ ] **Fase 4** — Dashboard, filtros e tela de revisão de categorias
 - [ ] **Fase 5** — LGPD: criptografia em repouso, retenção e registro de consentimento
 
+O contexto já levantado para as Fases 3 a 5 — decisões tomadas, questões em
+aberto e as armadilhas de cada uma — está em
+[`docs/fases-3-5.md`](docs/fases-3-5.md). A referência da API Pluggy, com marcação
+do que foi verificado na doc oficial e do que ainda precisa ser confirmado, está
+em [`docs/pluggy-api.md`](docs/pluggy-api.md).
+
 ### Decisões já tomadas para a Fase 2
 
 **Sync sob demanda, não webhook nem polling agendado.** A sincronização dispara
