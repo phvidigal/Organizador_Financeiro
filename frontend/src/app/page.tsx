@@ -5,6 +5,8 @@
 // compose, o backend alcança o Postgres, e o backend alcança o Ollama que roda
 // fora do Docker. É a peça mais frágil do setup e a mais barata de verificar aqui.
 
+import Link from "next/link";
+
 // `INTERNAL_API_URL` e não `NEXT_PUBLIC_API_URL`: este componente roda no servidor,
 // dentro da rede do compose, onde `localhost` seria o próprio container do frontend.
 const API_URL = process.env.INTERNAL_API_URL ?? "http://backend:8000";
@@ -46,8 +48,16 @@ export default async function Home() {
 
   return (
     <main>
+      <nav className="nav">
+        <Link href="/">Diagnóstico</Link>
+        <Link href="/conexoes">Conexões</Link>
+        <Link href="/transacoes">Transações</Link>
+      </nav>
+
       <h1>Organizador Financeiro</h1>
-      <p className="subtitle">Fase 0 e 1 concluídas — infraestrutura e schema.</p>
+      <p className="subtitle">
+        Fases 0 a 2 concluídas — infraestrutura, schema e integração com a Pluggy.
+      </p>
 
       <div className="card">
         <h2>Backend</h2>
@@ -90,8 +100,7 @@ export default async function Home() {
       </div>
 
       <p className="next-steps">
-        Próximo passo: Fase 2 — integração com a Pluggy (conexão de conta e
-        sincronização de transações).
+        Próximo passo: Fase 3 — categorização das transações pelo Ollama.
       </p>
     </main>
   );

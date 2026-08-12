@@ -141,7 +141,7 @@ legacy/      Protótipo SQLite original, apenas como referência
 
 - [x] **Fase 0** — Docker Compose, `.env.example`, Alembic
 - [x] **Fase 1** — Schema, RLS, constraints de deduplicação, seed de categorias
-- [ ] **Fase 2** — Integração Pluggy: conexão de conta, sync de transações,
+- [x] **Fase 2** — Integração Pluggy: conexão de conta, sync de transações,
       avaliação da categorização nativa
 - [ ] **Fase 3** — Categorização via Ollama (`qwen3.5:9b`)
 - [ ] **Fase 4** — Dashboard, filtros e tela de revisão de categorias
@@ -153,29 +153,57 @@ aberto e as armadilhas de cada uma — está em
 do que foi verificado na doc oficial e do que ainda precisa ser confirmado, está
 em [`docs/pluggy-api.md`](docs/pluggy-api.md).
 
-### Decisões já tomadas para a Fase 2
+### O que a Fase 2 descobriu
 
-**Sync sob demanda, não webhook nem polling agendado.** A sincronização dispara
-quando o app é atualizado. Isso dispensa endpoint público (que em `localhost`
-exigiria túnel) e dispensa cron. Duas consequências a tratar na implementação:
+As três incógnitas que o planejamento deixou em aberto foram medidas contra a API
+real, com credenciais do tier pessoal. Os detalhes técnicos estão em
+[`docs/pluggy-api.md`](docs/pluggy-api.md), marcados com 🔬; o resumo do que mudou
+no produto está aqui.
 
-- precisa de *throttle* por `bank_connections.last_synced_at`, senão dois F5
-  seguidos disparam duas atualizações do item na Pluggy;
-- a atualização de um item leva de segundos a minutos, então o request não pode
-  bloquear a tela — o endpoint devolve o estado atual e agenda o refresh.
+**O sync lê, não atualiza.** `PATCH /items/{id}` responde
+`400 "MeuPluggy item cant be updated"`: no tier pessoal não existe "buscar agora
+no banco". Quem dita a frequência é a Pluggy, que coleta sozinha a cada ~24h e
+anuncia a próxima em `nextAutoSyncAt` — daí a coluna
+`bank_connections.next_auto_sync_at` e a tela dizer "próxima coleta às HH:MM" em
+vez de prometer atualização sob demanda. O throttle de dez minutos continua
+existindo, agora por um motivo mais simples: sincronizar mais que isso relê
+exatamente o mesmo conteúdo.
+
+**O sinal do cartão é invertido — e o `type` já resolvia.** A conta de depósito
+reporta compra como valor negativo; o cartão reporta a mesma operação como
+positivo. Era exatamente a inversão que se temia, mas ela não chega ao banco
+porque a normalização decide pelo campo `type` (`DEBIT`/`CREDIT`), não pelo sinal
+recebido — confirmado comparando as duas contas do mesmo item, com a grande
+maioria das transações do cartão caindo como saída (estornos e o pagamento da
+fatura são a exceção esperada).
+
+**O `itemId` é digitado, e não por preguiça:** `GET /items` não permite listagem
+(responde 401 sempre), então não há como o backend descobrir quais conexões
+existem. `POST /connect_token` **funciona** no tier pessoal — o widget Pluggy
+Connect continua viável, e ficou fora da Fase 2 por escopo, não por impedimento.
+
+**A categorização nativa da Pluggy cobre bem, mas acerta menos do que cobre.**
+Testado contra um extrato real, ela classificou todas as transações sincronizadas,
+mas uma categoria genérica ("Shopping") funciona como balde — absorve compra de
+investimento, recarga de transporte e qualquer coisa cuja descrição comece com
+"Compra no débito", sem relação com o que de fato foi comprado. A Fase 3 tem
+trabalho, e agora com régua — `pluggy_category_id` está gravado em toda transação,
+e o de/para em `app/services/pluggy/category_map.py` liga a maior parte das
+nossas categorias à taxonomia deles.
 
 **Cartão de crédito: despesa na data da compra.** O pagamento da fatura entra
-como `TRANSFER`, então os mesmos valores não contam duas vezes. Falta confirmar,
-com dado real, o sinal que os connectors devolvem em conta de crédito — alguns
-invertem. O `raw_payload` guarda a resposta original, então é reprocessável.
+como `TRANSFER`, então os mesmos valores não contam duas vezes. Isso depende de
+categorização: até uma transferência ser classificada, ela conta como gasto (ver
+a invariante do `kind` no `CLAUDE.md`). É por isso que a tela de transações da
+Fase 2 não mostra totais — seriam números errados com cara de certos.
 
-**Como o `item` é criado?** `POST /connect_token` exige apenas a API key, então o
-widget Pluggy Connect deve funcionar no tier pessoal — mas há relatos de que a
-configuração de connectors trava após o trial do Dashboard, e o fluxo documentado
-para uso pessoal é conectar em `meu.pluggy.ai` e copiar o `itemId`. A Fase 2 vai
-suportar os dois caminhos; o schema atual já atende a ambos sem alteração.
+### Limitações conhecidas da Fase 2
 
-**A verificar na primeira chamada real:** se o tier gratuito permite disparar a
-atualização de um item (`PATCH /items/{id}`). Se não permitir, a frequência de
-atualização é ditada pela Pluggy e o "sync ao abrir o app" vira apenas leitura do
-que já foi sincronizado do lado deles.
+- **Exclusão na origem não é detectada.** A Pluggy só reporta remoção via webhook,
+  que está fora do desenho. Nenhuma transação é marcada como excluída pelo sync.
+- **Um worker só.** O lock que impede dois syncs simultâneos da mesma conexão vive
+  na memória do processo. Com `uvicorn --workers > 1` ele deixa de valer; o upsert
+  torna a corrida inofensiva, mas ela dobraria a cota consumida na Pluggy.
+- **O de/para de categorias é 1:1**, porque `categories.pluggy_category_id` é uma
+  coluna só. Onde a taxonomia da Pluggy é mais fina que a nossa, a categoria fica
+  sem mapeamento em vez de ganhar um mapeamento parcial.

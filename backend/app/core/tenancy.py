@@ -7,7 +7,8 @@ falha é "não vê nada", nunca "vê o tenant errado".
 """
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import text
@@ -68,15 +69,33 @@ async def set_tenant_scope(session: AsyncSession, tenant_id: uuid.UUID) -> None:
     )
 
 
-async def get_tenant_session(
-    tenant_id: uuid.UUID = Depends(resolve_tenant_id),
-) -> AsyncIterator[AsyncSession]:
+@asynccontextmanager
+async def tenant_session(tenant_id: uuid.UUID) -> AsyncIterator[AsyncSession]:
     """Sessão com RLS ativo, dentro de uma transação explícita.
 
     A transação é aberta aqui de propósito: `SET LOCAL` fora de transação é
     silenciosamente ignorado pelo Postgres, e o resultado seria uma sessão sem
     escopo nenhum sem qualquer erro visível.
+
+    Existe separada de `get_tenant_session` porque nem todo acesso a dado de tenant
+    acontece dentro de um request: a task de sync da Pluggy roda depois de a
+    resposta ter sido enviada, quando a sessão da dependency já foi fechada. Uma
+    sessão de background que esqueça o `SET LOCAL` não falha — ela lê zero linhas.
     """
     async with SessionLocal() as session, session.begin():
         await set_tenant_scope(session, tenant_id)
+        yield session
+
+
+# Assinatura de "algo que abre uma sessão com escopo de tenant". O sync a recebe
+# por parâmetro para que o teste possa injetar o banco de teste no lugar do
+# `SessionLocal` de produção.
+TenantSessionScope = Callable[[uuid.UUID], AbstractAsyncContextManager[AsyncSession]]
+
+
+async def get_tenant_session(
+    tenant_id: uuid.UUID = Depends(resolve_tenant_id),
+) -> AsyncIterator[AsyncSession]:
+    """Dependency do FastAPI. Uma implementação só, em `tenant_session`."""
+    async with tenant_session(tenant_id) as session:
         yield session
