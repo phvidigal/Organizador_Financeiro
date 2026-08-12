@@ -4,8 +4,9 @@ SaaS de finanças pessoais: agregação via Open Finance (Pluggy), categorizaç�
 LLM self-hosted (Ollama), multi-tenancy com RLS e conformidade com a LGPD.
 Uso pessoal, um único tenant ativo, schema já preparado para vários.
 
-**Estado:** Fases 0 e 1 concluídas (infra + schema). Fase 2 (Pluggy) é a próxima.
-O roadmap completo e o racional das decisões estão no [README](README.md).
+**Estado:** Fases 0 a 2 concluídas (infra, schema, integração Pluggy). Fase 3
+(categorização por LLM) é a próxima. O roadmap completo e o racional das decisões
+estão no [README](README.md).
 
 Idioma: código e schema em inglês; comentários, docs e conteúdo de usuário em
 pt-BR. Commits em pt-BR.
@@ -20,10 +21,7 @@ pt-BR. Commits em pt-BR.
 `upsert_external_transactions` (Pluggy, OFX) ou `insert_hashed_transactions`
 (CSV, manual).
 
-Essas funções carregam três regras que não estão em constraint nenhuma e que a
-suíte de testes **não** protege no caminho do sync — os testes exercitam o módulo
-diretamente, então um sync com `INSERT` próprio passa verde e quebra tudo em
-silêncio:
+Essas funções carregam três regras que não estão em constraint nenhuma:
 
 - re-sync **não** sobrescreve `category_id`, `category_source`,
   `categorization_status`, `category_confidence` nem `kind` quando
@@ -31,8 +29,22 @@ silêncio:
 - re-sync **ressuscita** linha soft-deleted (`deleted_at = NULL`);
 - `kind` é derivado do sinal do valor quando o chamador não informa.
 
-Ao escrever o sync da Fase 2, adicione um teste que exercite o caminho
-*ponta a ponta* (resposta da Pluggy → banco), não só `ingestion.py`.
+O caminho ponta a ponta (resposta da Pluggy → banco) está coberto em
+`tests/test_pluggy_sync.py`, sob a conexão `app_user` — e não só via
+`ingestion.py`, porque um sync com `INSERT` próprio passaria verde nos testes
+daquele módulo e quebraria as três regras em silêncio.
+
+### ⚠️ Armadilha esperando a Fase 3
+
+`keep_if_manual` protege só `category_source = 'MANUAL'`. Para tudo mais, o
+re-sync traz `categorization_status = 'PENDING'` de volta — inclusive em linhas
+que o LLM já tiver categorizado.
+
+Na Fase 2 isso é inócuo, porque nada categoriza ainda. **Na Fase 3 vira
+reprocessamento do histórico inteiro a cada sync**, com custo de GPU e nenhum
+sinal visível de que algo está errado. A correção é em `ingestion.py` (preservar
+quando `category_source IS NOT NULL`, não só quando é `MANUAL`) e o lugar de
+fazê-la é o começo da Fase 3.
 
 ### 2. Acesso a dado de tenant passa por `get_tenant_session`
 
@@ -112,39 +124,78 @@ docker compose exec backend ruff check . --fix
 - **Novo módulo de teste com `async def`** precisa de
   `pytestmark = pytest.mark.asyncio(loop_scope="session")` no topo, senão o
   asyncpg quebra com "attached to a different loop". Teste síncrono não pode
-  ficar num módulo com esse marcador — use `tests/test_ingestion_pure.py`.
+  ficar num módulo com esse marcador — use `tests/test_ingestion_pure.py`,
+  `tests/test_pluggy_pure.py`, `tests/test_pluggy_mappers.py` ou
+  `tests/test_config.py`.
+- **`docker compose restart` não relê o `.env`.** As variáveis são injetadas na
+  criação do container; depois de editar o arquivo é
+  `docker compose up -d --force-recreate backend`. E `get_settings()` é
+  `lru_cache`, então mesmo dentro do processo não há recarga.
+- **Nos binds do asyncpg, use tipos Python de verdade.** `'2026-08-01'` como
+  string numa coluna `date` levanta `AttributeError: 'str' object has no
+  attribute 'toordinal'` — o psycopg aceitaria, o asyncpg não. Data literal
+  *dentro* da string SQL funciona; como parâmetro, não.
+- **Mock de HTTP é `httpx.MockTransport`**, que já vem no httpx. Não adicione
+  `respx` nem `pytest-httpx`: o `AsyncClient` injetável que ele exige é o mesmo
+  mecanismo que o teste ponta a ponta do sync usa.
 
 ---
 
-## Fase 2 — o que já está decidido
+## Fase 2 — como a integração Pluggy funciona
 
-Ver também a seção "Decisões já tomadas para a Fase 2" no README e a referência
-de API em [`docs/pluggy-api.md`](docs/pluggy-api.md) (não trabalhe de memória:
-a doc oficial está linkada lá).
+Referência de API em [`docs/pluggy-api.md`](docs/pluggy-api.md) — **não trabalhe
+de memória**: o que foi medido contra a API real está marcado com 🔬 lá, e é onde
+os palpites de planejamento foram corrigidos.
 
-- **Sync sob demanda**, disparado quando o app é atualizado. Não é webhook (que
-  exigiria endpoint público) nem cron. Precisa de throttle por
-  `bank_connections.last_synced_at` e de execução não-bloqueante — atualizar um
-  item na Pluggy leva de segundos a minutos.
-- **Cartão de crédito:** cada compra é despesa na data da compra; pagamento da
-  fatura entra como `TRANSFER`. Confirmar com dado real o sinal que o connector
-  devolve em conta de crédito — alguns invertem.
-- **Criação do item:** suportar os dois caminhos — colar um `itemId` existente
-  (o usuário já tem um, vindo de meu.pluggy.ai) e o widget Pluggy Connect. O
-  schema atende aos dois sem alteração.
-- **Antes de partir para o LLM**, avaliar se a categorização nativa da Pluggy já
-  basta. É para isso que `pluggy_category_id` / `pluggy_category_name` guardam a
-  resposta crua e que `category_source` existe.
-- **A verificar na primeira chamada real:** se o tier gratuito ("Meu Pluggy")
-  permite disparar atualização de item. Se não permitir, a frequência é ditada
-  pela Pluggy e o sync vira só leitura.
+Três camadas, com fronteira rígida porque cada uma muda por um motivo diferente:
 
-### Limitação conhecida
+| Módulo | Muda quando | Conhece |
+|---|---|---|
+| `pluggy/client.py` | a API da Pluggy muda | httpx, settings |
+| `pluggy/mappers.py` | o schema muda, ou a convenção de sinal | nada (puro) |
+| `pluggy/sync.py` | a orquestração muda | client + mappers + ingestion |
+| `pluggy/runner.py` | — | é a única parte que fala com o event loop |
 
-`dedup_seq` é numerado por lote (`app/services/ingestion.py`). Reimportar o mesmo
-arquivo é no-op, mas dois extratos com sobreposição *parcial* podem descartar uma
-ocorrência legítima. O usuário pretende usar só Pluggy, então isso só importa se
-a importação OFX/CSV virar caminho principal.
+O que é fácil de quebrar sem saber:
+
+- **`upsert_external_transactions` olha só `rows[0].keys()`** para decidir o que o
+  `ON CONFLICT` atualiza. Por isso `map_transaction` monta um literal com todas as
+  chaves sempre, `None` onde não há dado, e tem um `assert` contra
+  `TRANSACTION_ROW_KEYS`. Omitir chave faz coluna sumir do UPDATE em silêncio.
+- **Nenhuma chamada HTTP acontece com transação de banco aberta.** Uma sessão por
+  unidade de trabalho; a Pluggy é chamada entre elas. É o que torna o sync
+  retomável e o que evita conexão `idle in transaction` por minutos.
+- **O parse do JSON usa `parse_float=Decimal`** para dinheiro nunca virar float —
+  e por isso `jsonable()` existe, para o `Decimal` conseguir entrar num JSONB.
+- **`asyncio.create_task` precisa de referência forte** (`runner._tasks`), senão o
+  GC pode coletar a task no meio e o sync para sem erro e sem log.
+- **A validação de parâmetros da Pluggy é estrita**: mandar uma chave a mais na
+  query derruba a chamada com 400. Não mande nada "por via das dúvidas".
+
+O sync **lê, não atualiza**: `PATCH /items` é recusado no tier pessoal
+(`REQUEST_REFRESH_BY_DEFAULT = False`). A frequência é da Pluggy, anunciada em
+`bank_connections.next_auto_sync_at`.
+
+### Endpoint temporário
+
+`GET /pluggy/diagnostics` (`app/api/v1/pluggy_diagnostics.py`) despeja a resposta
+crua da Pluggy ao lado do que seria gravado. Foi escrito para a validação da Fase
+2 e continua útil para depurar connector novo. Bloqueado em produção; nunca
+devolve valor de segredo, só nomes de campo.
+
+### Limitações conhecidas
+
+- **Exclusão na origem não é detectada.** A Pluggy só reporta remoção via webhook,
+  fora do desenho. O sync nunca escreve `deleted_at` — e o upsert o *limpa*.
+- **O lock de sync é por processo** (`runner._tasks`). Com `uvicorn --workers > 1`
+  dois syncs simultâneos da mesma conexão passam a ser possíveis: inofensivos
+  graças ao upsert, mas dobram a cota consumida.
+- **O de/para de categorias é 1:1**, porque `categories.pluggy_category_id` é uma
+  coluna só. Onde a taxonomia deles é mais fina, a categoria fica sem mapeamento.
+- **`dedup_seq` é numerado por lote** (`app/services/ingestion.py`). Reimportar o
+  mesmo arquivo é no-op, mas dois extratos com sobreposição *parcial* podem
+  descartar uma ocorrência legítima. Só importa se a importação OFX/CSV virar
+  caminho principal — o sync da Pluggy não usa esse caminho.
 
 ## Fases 3 a 5
 

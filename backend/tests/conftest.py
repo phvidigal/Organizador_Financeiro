@@ -2,16 +2,17 @@
 
 Duas conexões diferentes, de propósito:
 
-* `admin_session` — role owner. Ignora RLS, então serve para montar cenário
-  (criar tenants, contas) sem lutar contra as policies.
-* `app_session`   — role `app_user`, o mesmo que a aplicação usa. É a única
-  conexão que exercita o RLS de verdade; testar isolamento com a conexão de
-  owner daria falso positivo, porque o owner nunca é filtrado.
+* `admin_engine` / `admin_session` — role owner. Ignora RLS, então serve para
+  montar cenário (criar tenants, contas) sem lutar contra as policies.
+* `app_engine` / `app_tenant_session` — role `app_user`, o mesmo que a aplicação
+  usa. É a única conexão que exercita o RLS de verdade; testar isolamento com a
+  conexão de owner daria falso positivo, porque o owner nunca é filtrado.
 """
 
 import os
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from alembic import command
 from alembic.config import Config
+from app.core.tenancy import set_tenant_scope
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -145,6 +147,36 @@ async def tenants(admin_session: AsyncSession) -> AsyncIterator[tuple[uuid.UUID,
         text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": str(TENANT_A), "b": str(TENANT_B)}
     )
     await admin_session.commit()
+
+
+@pytest.fixture
+def app_tenant_session(app_engine):
+    """Espelho de `app.core.tenancy.tenant_session` apontado para o banco de teste.
+
+    Existe porque `tenant_session` está preso ao `SessionLocal` de produção, e
+    serviços que rodam fora do request (o sync da Pluggy) recebem o abridor de
+    sessão por parâmetro justamente para poderem ser testados.
+
+    Conecta como `app_user` de propósito, e não como owner: o sync roda sob RLS em
+    produção, e testar com a conexão de owner esconderia uma policy faltando ou um
+    `set_tenant_scope` esquecido na task de background — o modo de falha silencioso
+    em que a leitura devolve zero linhas.
+
+    Comita ao sair do bloco (é o que `session.begin()` faz), ao contrário de
+    `admin_session`: o serviço sob teste depende de o dado gravado numa unidade de
+    trabalho estar visível para a seguinte.
+    """
+    maker = async_sessionmaker(
+        bind=app_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+    )
+
+    @asynccontextmanager
+    async def scope(tenant_id: uuid.UUID) -> AsyncIterator[AsyncSession]:
+        async with maker() as session, session.begin():
+            await set_tenant_scope(session, tenant_id)
+            yield session
+
+    return scope
 
 
 @pytest.fixture

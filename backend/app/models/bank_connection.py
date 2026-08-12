@@ -45,6 +45,16 @@ class BankConnection(Base, TimestampMixin, SoftDeleteMixin):
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Quando a Pluggy vai buscar dado novo na instituição por conta própria.
+    #
+    # No tier pessoal não dá para pedir atualização (`PATCH /items` responde 400
+    # para item do connector MeuPluggy), então este campo é a única resposta
+    # honesta para "quando vou ver lançamento novo?". Sem ele a tela mostraria só
+    # a hora da última leitura, e o usuário ficaria sincronizando à toa.
+    next_auto_sync_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # --- Consentimento (LGPD / Open Finance) ---------------------------------
     # Já aqui, não só na Fase 5: o consentimento do Open Finance expira (~12 meses)
     # e o sync precisa saber disso para avisar o usuário antes de a conexão morrer.

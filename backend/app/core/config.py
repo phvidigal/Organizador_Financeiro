@@ -56,6 +56,36 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
 
+    @field_validator(
+        "pluggy_client_id",
+        "pluggy_client_secret",
+        "pluggy_item_id",
+        "app_encryption_key",
+        mode="before",
+    )
+    @classmethod
+    def _strip_optional_secret(cls, v: object) -> object:
+        """Remove espaço em volta de valor colado no `.env`, e trata vazio como ausente.
+
+        `PLUGGY_CLIENT_ID= abc` (com o espaço depois do `=`) é artefato comum de
+        copiar do navegador, e o espaço viaja junto até o corpo da requisição. A
+        Pluggy responde 401 sem dizer por quê, e o valor *parece* certo em qualquer
+        inspeção visual — o erro só aparece contando caracteres.
+
+        Vazio vira `None` para que "não configurado" tenha um significado só: é o
+        que faz `get_pluggy_client` responder 503 explicando o que falta, em vez de
+        tentar autenticar com string vazia e devolver um 401 confuso.
+        """
+        if isinstance(v, str):
+            return v.strip() or None
+        return v
+
+    @field_validator("pluggy_base_url", "ollama_base_url", "ollama_model", mode="before")
+    @classmethod
+    def _strip_url(cls, v: object) -> object:
+        """Mesma limpeza, sem converter vazio em `None`: estes campos são `str`."""
+        return v.strip() if isinstance(v, str) else v
+
     @property
     def sync_database_url(self) -> str:
         """DSN síncrona para o Alembic.

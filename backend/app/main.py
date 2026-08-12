@@ -7,10 +7,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.deps import close_pluggy_client
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.db import engine
 from app.core.rls_guard import assert_rls_enforced
+from app.services.pluggy.runner import shutdown_sync_tasks
 
 
 @asynccontextmanager
@@ -21,6 +23,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await assert_rls_enforced(engine)
 
     yield
+
+    # Ordem importa: cancelar os syncs antes de fechar o cliente HTTP e o pool do
+    # banco, senão uma task viva encontraria os dois já fechados.
+    await shutdown_sync_tasks()
+    await close_pluggy_client()
 
     # Fecha o pool no shutdown; sem isso o --reload deixa conexões penduradas no
     # Postgres a cada reinício até estourar o max_connections.
