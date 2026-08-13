@@ -143,15 +143,155 @@ legacy/      Protótipo SQLite original, apenas como referência
 - [x] **Fase 1** — Schema, RLS, constraints de deduplicação, seed de categorias
 - [x] **Fase 2** — Integração Pluggy: conexão de conta, sync de transações,
       avaliação da categorização nativa
-- [ ] **Fase 3** — Categorização via Ollama (`qwen3.5:9b`)
+- [x] **Fase 3** — Categorização via Ollama (`qwen3.5:9b`), com saída restrita por
+      JSON Schema e fila de revisão
 - [ ] **Fase 4** — Dashboard, filtros e tela de revisão de categorias
 - [ ] **Fase 5** — LGPD: criptografia em repouso, retenção e registro de consentimento
 
-O contexto já levantado para as Fases 3 a 5 — decisões tomadas, questões em
+O contexto já levantado para as Fases 4 e 5 — decisões tomadas, questões em
 aberto e as armadilhas de cada uma — está em
 [`docs/fases-3-5.md`](docs/fases-3-5.md). A referência da API Pluggy, com marcação
 do que foi verificado na doc oficial e do que ainda precisa ser confirmado, está
 em [`docs/pluggy-api.md`](docs/pluggy-api.md).
+
+### Como a Fase 3 categoriza
+
+Uma chamada ao Ollama por transação, com a lista de categorias do titular
+**dentro do JSON Schema** que vai no parâmetro `format`. O modelo não escreve um
+nome de categoria: ele escolhe um item de um `enum`, e o Ollama restringe a
+gramática da geração a ele. Resposta fora da taxonomia deixa de ser possível por
+construção, em vez de ser um texto a ser adivinhado depois.
+
+**A confiança do modelo não decide sozinha.** Confiança autodeclarada por LLM é
+mal calibrada — 0,95 sai com a mesma facilidade no acerto e no erro. Então o
+segundo sinal é a **discordância com a categorização nativa da Pluggy**: quando as
+duas fontes independentes apontam para árvores diferentes, a transação vai para
+`NEEDS_REVIEW` mesmo com confiança alta. É para isso que
+`categories.pluggy_category_id` foi preenchido na Fase 2.
+
+O número cru do modelo é gravado como veio, sem misturar a concordância dentro
+dele. Combinar os dois sinais numa coluna só destruiria justamente o dado que a
+Fase 4 precisa para medir a calibração real, comparando as previsões com as
+correções manuais do usuário.
+
+**Ao categorizar, o `kind` é herdado de `categories.kind`.** É o passo que tira o
+pagamento de fatura e o Pix entre contas próprias do total de gastos — sem ele, a
+categoria diz "Transferências" e o dashboard continua somando o valor como
+despesa.
+
+O job é retomável de graça: a fila é `categorization_status = 'PENDING'`, cada
+transação é gravada na própria unidade de trabalho, e nenhuma chamada ao Ollama
+acontece com transação de banco aberta. Uma queda no meio do backlog preserva o
+que já foi feito. Concorrência é 1 de propósito — o Ollama serializa requisições,
+então paralelismo não acelera, só enfileira.
+
+Disparo:
+
+```bash
+curl -s -X POST "http://localhost:8000/categorization/run?limit=10"
+```
+
+`GET /categorization/status` acompanha, e `POST /categorization/reset` devolve à
+fila as decisões do LLM — é o que torna barato ajustar o prompt e rodar de novo.
+Ele recusa `source=MANUAL`: a correção do usuário é a régua para medir o acerto do
+LLM, e nenhum caminho do sistema pode apagá-la. O sync da Pluggy encadeia a
+categorização ao terminar, então transação nova não fica parada na fila.
+
+### O que a primeira rodada real mostrou
+
+🔬 O extrato inteiro — **333 transações, `qwen3.5:9b`, ~11 minutos, zero falhas.**
+Cerca de 1,6 s por transação com o modelo quente. Resultado: 237 `CATEGORIZED`,
+96 `NEEDS_REVIEW`.
+
+**O balde da Pluggy rachou, que era a aposta da fase.** Papelaria, lanchonete e
+compra de renda variável estavam todos sob `Shopping` e saíram para categorias
+diferentes. E as duas pernas do pagamento de fatura — a saída na conta e a entrada
+no cartão, de mesmo valor — viraram `TRANSFER`: os mesmos reais deixaram de contar
+como despesa de um lado e receita do outro.
+
+**O `kind` mudou de forma:** de 272 `EXPENSE` / 61 `INCOME` / **0** `TRANSFER`
+para 176 / 13 / **144**. Cento e quarenta e quatro lançamentos saíram dos totais
+de receita e despesa — que é a razão de o campo existir.
+
+**Os dois sinais de revisão pesam quase igual:** dos 96 `NEEDS_REVIEW`, **51 vêm
+de discordância com a Pluggy e 45 de confiança abaixo de 0,70**.
+
+Vale registrar que uma amostra de dez transações havia sugerido o contrário. Nela
+a confiança veio `0.950` em nove respostas, e a conclusão apressada foi que o
+número era constante e o limiar, decorativo. Com 333, ele se distribui — 269 em
+`0.950`, mas também 27 em `0.650`, 15 em `0.450`, 3 em `0.150`, 10 em `1.000`. O
+limiar dispara, e responde por quase metade da fila de revisão. Dez transações não
+eram amostra.
+
+**A comparação por raiz se pagou.** Uma compra de ingressos recebeu
+`Digital services` da Pluggy (→ *Streaming e assinaturas*) e `Eventos e cultura`
+do LLM: folhas diferentes, mesma raiz `Lazer`. Comparar por folha teria mandado
+um acerto para a revisão.
+
+**A receita tinha sumido, e a taxonomia era a culpada.** Na primeira passada
+`Receitas` ficou com 13 lançamentos — só rendimento de investimento, **menos de 1%
+do dinheiro que de fato entrou no período**. Os outros 99% estavam em
+`Transferências > Pix recebido`: 34 lançamentos, com parcelas mensais de valor
+idêntico e pagamentos vindos de pessoa jurídica.
+
+O modelo não errou: `Pix recebido` nasceu sob `Transferências` na Fase 1, e
+`Transferências` é `TRANSFER`. Isso embute a premissa de que **todo** Pix recebido
+é dinheiro andando entre contas do próprio titular — falsa para qualquer pessoa
+que receba pagamento por Pix no Brasil.
+
+A migration `0004` moveu `Pix recebido` para `Receitas` (`INCOME`), deixando
+`Transferências > Transferência entre contas próprias` para o caso legítimo. Mas
+nem todo Pix é renda, e a escolha entre as duas depende de saber quem é o
+remetente — coisa que só o titular sabe. Então o prompt manda o modelo **baixar a
+confiança quando não houver como decidir**: a confiança é o único canal que ele
+tem para fazer uma pergunta, e confiança baixa põe a transação em `NEEDS_REVIEW`
+em vez de cravar um palpite.
+
+Depois da migration, com o backlog reprocessado:
+
+| | antes | depois |
+|---|---|---|
+| lançamentos em `Receitas` | 13 | **45** |
+| do que entrou, quanto era receita | <1% | **~100%** |
+| `INCOME` / `EXPENSE` / `TRANSFER` | 13 / 176 / 144 | 45 / 185 / 103 |
+| `NEEDS_REVIEW` | 96 | 137 |
+
+Os 32 `Pix recebido` foram **todos** para a fila de revisão, e os 15
+`Transferência entre contas próprias` passaram direto — o modelo cravou onde havia
+evidência (mesmo nome no remetente) e perguntou onde não havia. A fila subiu de
+96 para 137 porque ele passou a perguntar mais, que é o comportamento desejado: os
+137 se dividem em **70 perguntas por confiança baixa e 67 discordâncias da
+Pluggy**.
+
+⏳ **O aprendizado ainda não fecha o laço.** A resposta do titular vira
+`category_source = 'MANUAL'` e sobrevive a qualquer re-sincronização, e
+`category_rules` já existe com o formato fixado — mas o LLM **não vê as correções
+anteriores**. Realimentá-lo é a pipeline híbrida (`regra → embedding → LLM`), que
+depende da tela de revisão da Fase 4 para haver o que aprender. Hoje há zero
+correções manuais no banco.
+
+**Faltava categoria para compra de investimento** — e a rodada foi o que revelou.
+"Compra de Renda Variável" caía em `Outros` porque a taxonomia só tinha `Receitas >
+Rendimentos e investimentos`, que é `INCOME`. O LLM não errou: não havia para onde
+ir. A migration `0003` criou a árvore `Investimentos` (renda fixa, renda variável,
+fundos, criptoativos, previdência), **com `kind = TRANSFER`**.
+
+Aplicar não é gastar e resgatar não é receber: o principal continua sendo do
+titular, só muda de conta. Fosse `EXPENSE`, um mês com R$ 5.000 aplicados
+apareceria como R$ 5.000 de gasto — e o resgate desses mesmos R$ 5.000, meses
+depois, como receita. O mesmo dinheiro contado duas vezes é precisamente o que o
+campo `kind` existe para evitar.
+
+O **rendimento** é outra coisa e continua onde estava: juros e dividendos são
+dinheiro novo, e ficam em `Receitas > Rendimentos e investimentos` (`INCOME`). Essa
+distinção é a parte frágil, e a regra 4 do prompt existe só para sustentá-la — na
+rodada seguinte à migration, "Compra de Renda Variável" foi para
+`Investimentos > Renda variável` (`TRANSFER`) e "Valor recebido de Investimentos"
+continuou em `Rendimentos e investimentos` (`INCOME`), que era exatamente o risco.
+
+> ⏳ **A calibração final ainda depende da Fase 4.** O limiar dispara e responde
+> por metade da fila, mas se `0.450` de fato erra mais que `0.950` só as correções
+> `MANUAL` acumuladas vão dizer.
 
 ### O que a Fase 2 descobriu
 

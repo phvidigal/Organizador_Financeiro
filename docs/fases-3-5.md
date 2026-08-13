@@ -1,15 +1,22 @@
 # Fases 3 a 5 — contexto acumulado
 
-Notas levantadas enquanto as Fases 0 e 1 eram construídas. **Nada aqui está
-implementado.** A execução continua uma fase por vez; este documento existe para
-que a decisão tomada na Fase 1 não precise ser redescoberta na Fase 4.
+Notas levantadas enquanto as Fases 0 e 1 eram construídas. Este documento existe
+para que a decisão tomada numa fase não precise ser redescoberta na seguinte.
 
 Convenção: ✅ **decidido** (e por quê) · ⚠️ **em aberto** (precisa de decisão ou
-de dado real).
+de dado real) · 🛠️ **implementado** (onde, e o que mudou em relação ao plano).
+
+**A Fase 3 foi construída** — a seção abaixo virou registro do que ficou de pé, e
+não mais plano. As Fases 4 e 5 continuam sem implementação nenhuma.
 
 ---
 
-## Fase 3 — Categorização via LLM
+## Fase 3 — Categorização via LLM · 🛠️ implementada
+
+Código em `app/services/categorization/`. O resumo operacional está no
+[README](../README.md) e as armadilhas no
+[`CLAUDE.md`](../CLAUDE.md); o que segue é o histórico das decisões, com o que o
+plano acertou e o que precisou mudar.
 
 ### A fila já existe no schema
 
@@ -23,6 +30,12 @@ Ao categorizar, o job escreve cinco campos de uma vez:
 `category_confidence`, `categorized_at` — **e `kind`, herdado de
 `categories.kind`**. Esquecer o `kind` deixa um Pix classificado como
 "Transferências" ainda contando como gasto no dashboard.
+
+🛠️ As seis colunas viraram `store.apply_decision`, com uma exceção que o plano não
+previa: **`category_source` fica NULL quando o resultado é `FAILED`**. Como o
+upsert do re-sync preserva toda linha com `category_source IS NOT NULL`, gravar
+`'LLM'` num fracasso congelaria a linha em `FAILED` para sempre. Com NULL, o
+próximo sync a devolve para `PENDING` e ela é tentada de novo sozinha.
 
 ### Saída estruturada por JSON Schema, não por parsing
 
@@ -52,8 +65,22 @@ para gerar o schema a partir de um modelo Pydantic (`model_json_schema()`) e
 reusar o mesmo modelo para validar a resposta. Temperatura 0 é a recomendação da
 própria documentação para extração determinística.
 
-⚠️ Falta confirmar na prática que o `qwen3.5:9b` respeita bem o schema — é um
-teste de dez minutos com o modelo local, e vale fazer antes de desenhar o resto.
+🛠️ `app/services/categorization/client.py` monta essa requisição, com dois
+acréscimos que o plano não previa:
+
+- **`"think": false`**. O qwen3 é modelo de raciocínio, e pensar antes de escolher
+  um item de lista fechada só multiplica o tempo por transação. Como nem todo
+  modelo honra o pedido, `prompt.parse_response` ainda remove um `<think>…</think>`
+  do começo do conteúdo — sem isso o `json.loads` falha num corpo que, tirando o
+  prefixo, estava perfeito.
+- **`parse_float=Decimal`** também aqui, pelo mesmo motivo do cliente da Pluggy: a
+  confiança vai para `NUMERIC(4,3)`, e `Decimal(0.85)` não é 0.85.
+
+🔬 **Confirmado na primeira rodada real** (10 transações do extrato, 35 s, zero
+falhas): o `qwen3.5:9b` respeitou o `enum` em todas as respostas — nenhuma caiu no
+caminho de "rótulo fora da taxonomia". A suíte continua rodando com
+`httpx.MockTransport` e dublês, que é o certo; a verificação contra o modelo é
+manual e pontual.
 
 ### Validar contra a lista real de categorias
 
@@ -63,10 +90,20 @@ resposta precisa ser resolvida contra as categorias do tenant, e o que não casa
 vira `categorization_status = 'NEEDS_REVIEW'` — não `FAILED`, que é para erro de
 infraestrutura.
 
-Uma alternativa mais forte, a avaliar: colocar a enumeração das categorias
-válidas dentro do próprio schema (`"enum": [...]`), o que torna a resposta
-inválida impossível por construção. Custa tokens no prompt e precisa ser
-regenerado quando o usuário cria categoria.
+🛠️ **A alternativa mais forte foi a escolhida**: as categorias vão no `enum` do
+próprio schema (`prompt.build_schema`), o que torna a resposta inválida impossível
+por construção. O custo de tokens é real mas pequeno — 50 rótulos —, e o schema é
+gerado por tenant a cada execução, então categoria criada ou desativada entra e
+sai sozinha na rodada seguinte.
+
+🛠️ **Os rótulos são qualificados** (`"Alimentação > Delivery"`), decisão que o
+plano não tinha. O índice único de categorias é `(tenant_id, parent_id, name)`,
+então dois pais podem ter filhas de mesmo nome: com nomes crus, `"Manutenção"`
+mapearia duas categorias e resolver a resposta viraria chute. De quebra, a
+hierarquia chega ao modelo sem gastar uma linha de prompt.
+
+A resolução tolerante (caixa e espaços) e o caminho de `NEEDS_REVIEW` para rótulo
+desconhecido continuam existindo, como rede para um modelo que ignore o `format`.
 
 ### `category_confidence` merece ceticismo
 
@@ -86,6 +123,51 @@ Três caminhos, a decidir com dado real:
    manuais do usuário e comparar. É o único caminho honesto, e só funciona depois
    de haver volume.
 
+🛠️ **1 e 2 juntos, com 3 preservado.** `decide.decide` manda para `NEEDS_REVIEW`
+quando a confiança fica abaixo de `LOW_CONFIDENCE = 0.70` **ou** quando a raiz da
+categoria escolhida diverge da que o de/para da Pluggy indicaria.
+
+A comparação é por **raiz**, não por folha: `"Alimentação"` contra
+`"Alimentação > Restaurantes e bares"` é diferença de granularidade, e mandar isso
+para revisão encheria a fila de acertos — que é a forma mais rápida de a tela de
+revisão deixar de ser usada. Categoria da Pluggy sem de/para é "sem contraparte",
+não discordância.
+
+O caminho 3 continua possível porque `category_confidence` guarda o número **cru**
+do modelo: a concordância entra na decisão, nunca no número. Misturar os dois
+sinais numa coluna só destruiria exatamente o dado necessário para medir a
+calibração depois. A concordância continua derivável por join entre
+`transactions.pluggy_category_id` e `categories.pluggy_category_id`.
+
+🔬 **Os dois sinais pesam quase igual, e a amostra pequena mentiu.**
+
+Nas 333 transações reais, os 96 `NEEDS_REVIEW` se dividem em **51 por discordância
+com a Pluggy e 45 por confiança abaixo de 0,70**. A distribuição do número do
+modelo:
+
+| confiança | lançamentos |
+|---|---|
+| 1.000 | 10 |
+| 0.980 | 5 |
+| 0.950 | **269** |
+| 0.850 | 4 |
+| 0.650 | 27 |
+| 0.450 | 15 |
+| 0.150 | 3 |
+
+Registro do erro, porque ele é instrutivo: uma amostra de **dez** transações havia
+mostrado `0.950` em nove respostas, e a conclusão tirada dali foi que o número era
+uma constante e o limiar, decorativo. Está errado. O `0.950` é a resposta modal —
+o modelo a usa para tudo que considera conclusivo —, mas ele *desce* quando a
+descrição é genérica, e é justamente aí que a revisão importa. Dez transações
+amostravam o comportamento comum e nenhum dos casos difíceis.
+
+Conclusão que sobrevive: **manter as duas fontes.** Cada uma pega metade da fila,
+e nenhuma delas cobre a outra.
+
+⚠️ O que continua em aberto é se a confiança está *bem calibrada* — se `0.450`
+erra mais que `0.950`. Isso só as correções `MANUAL` da Fase 4 podem dizer.
+
 ### Concorrência
 
 ⚠️ O Ollama serializa requisições por padrão. Com GPU dedicada, uma chamada por
@@ -97,6 +179,38 @@ que já foi feito nem reprocessar tudo. Como cada transação é atualizada
 individualmente e a fila é definida por `categorization_status`, isso sai de
 graça — desde que o job não abra uma transação de banco única para o lote inteiro.
 
+🛠️ Concorrência 1, uma unidade de trabalho por transação, e nenhuma chamada HTTP
+com transação de banco aberta — a mesma disciplina de `pluggy/sync.py`.
+
+🛠️ **O que o plano não previa foi a distinção entre os dois tipos de falha.**
+Ollama fora do ar não pode marcar transação como `FAILED`: seriam centenas de
+linhas precisando de um reset manual para voltar à fila. O job conta falhas de
+infraestrutura consecutivas, aborta na terceira e **deixa as linhas `PENDING`**.
+`FAILED` fica para o erro inesperado de uma linha só, e `NEEDS_REVIEW` para
+resposta que chegou mas não serve.
+
+🛠️ E a peça que faltava para o job ser de fato retomável não estava no job:
+`ingestion.keep_if_manual` preservava só `category_source = 'MANUAL'`, então cada
+coleta automática da Pluggy devolveria o histórico inteiro para a fila. Virou
+`keep_if_decided` (`category_source IS NOT NULL`) no primeiro commit da fase. A
+armadilha estava anotada no `CLAUDE.md` desde a Fase 2 — e sem essa anotação teria
+passado despercebida, porque não produz erro nenhum.
+
+### Gatilho
+
+🛠️ `POST /categorization/run` dispara em background e devolve 202; um segundo
+disparo enquanto há execução recebe 409 (o lock é por tenant, em memória do
+processo). O sync da Pluggy encadeia a categorização ao terminar em `SUCCESS` com
+escrita — pelo gancho `_chain_categorization` em `app/api/v1/connections.py`, e
+não dentro de `pluggy/runner.py`, para que o pacote da Pluggy siga sem saber que a
+Fase 3 existe.
+
+🛠️ `POST /categorization/reset` devolve à fila as decisões de uma origem
+(`LLM` por padrão) e recusa `MANUAL`. Existe para a iteração de prompt: sem ele, a
+única forma de reprocessar seria um `UPDATE` na mão — e quem o escreve esquece de
+reverter o `kind`, deixando um Pix marcado como `TRANSFER` apontando para
+categoria nenhuma.
+
 ### Ponto de extensão da pipeline híbrida
 
 ✅ `category_rules` existe vazia, com o formato já fixado
@@ -107,17 +221,34 @@ A pipeline final é `regra → embedding → LLM`, com o LLM como último recurs
 MVP implementa só o LLM, mas o `category_source` gravado precisa ser fiel desde
 já — é ele que vai permitir medir, depois, quanto de cada camada ficou.
 
+🛠️ Continua fiel: o job grava `'LLM'` e nada mais. Uma camada nova entra por
+`store.apply_decision`, que é onde as seis colunas são escritas juntas — não por
+um `UPDATE` próprio.
+
 ### Antes de codificar a Fase 3
 
-✅ A Fase 2 tem que responder primeiro: **a categorização nativa da Pluggy já
+✅ A Fase 2 tinha que responder primeiro: **a categorização nativa da Pluggy já
 basta?** É para isso que `pluggy_category_id` / `pluggy_category_name` guardam a
-resposta crua. A medição é comparar a categoria da Pluggy com as correções
-`category_source = 'MANUAL'` depois de algumas semanas de uso. Se o acerto for
-alto, a Fase 3 encolhe para "LLM só nos casos que a Pluggy não classificou".
+resposta crua.
+
+🛠️ **A resposta foi "não, mas ajuda"**, e ela mudou o desenho. A Pluggy classifica
+100% das transações, mas com categorias-balde: `Shopping` absorveu 50 das 333
+linhas, incluindo compra de investimento e recarga de transporte. Adotar o palpite
+dela onde há de/para teria herdado o balde inteiro.
+
+Então o LLM decide **todas** as pendentes, e a categoria da Pluggy entra no prompt
+como pista explicitamente falível ("o palpite do agregador costuma usar categorias
+genéricas como balde; discorde dele quando a descrição indicar outra coisa") e na
+decisão como sinal de confiança. A medição contra as correções `MANUAL` continua
+valendo — agora para as duas fontes, não só para a Pluggy.
+
+Um número que vale registrar como linha de base: antes da Fase 3, **zero** das 333
+transações tinham `kind = 'TRANSFER'`, enquanto a Pluggy apontava ~114 como
+transferência. Todas contavam como gasto.
 
 ---
 
-## Fase 4 — Frontend
+## Fase 4 — Frontend · ⚠️ não implementada
 
 ### Três telas
 
@@ -165,7 +296,7 @@ já tem `users` com `hashed_password`, sem nada implementado em cima.
 
 ---
 
-## Fase 5 — LGPD e segurança
+## Fase 5 — LGPD e segurança · ⚠️ não implementada
 
 ### O que realmente precisa de criptografia
 
@@ -225,5 +356,15 @@ autenticação real.
 | Autenticação inexistente (`X-Tenant-Id` é confiado cegamente) | bloqueia qualquer exposição pública |
 | `dedup_seq` numerado por lote quebra em extratos com sobreposição parcial | só importa se OFX/CSV virar caminho principal |
 | `test_every_tenant_table_has_rls_enabled` itera `TENANT_SCOPED_TABLES` — tabela nova fora da lista escapa | melhoraria detectando qualquer tabela com coluna `tenant_id` |
-| Sinal invertido em conta de crédito por alguns connectors | confirmar na primeira sync real (Fase 2) |
-| Tier gratuito permite disparar atualização de item? | confirmar na primeira chamada real (Fase 2) |
+| ~~Sinal invertido em conta de crédito por alguns connectors~~ | ✅ resolvido na Fase 2: a normalização decide pelo `type`, não pelo sinal |
+| ~~Tier gratuito permite disparar atualização de item?~~ | ✅ respondido na Fase 2: não (`REQUEST_REFRESH_BY_DEFAULT = False`) |
+| ~~`qwen3.5:9b` respeita o `enum` do schema na prática?~~ | ✅ sim, 10/10 na primeira rodada real |
+| ~~Não existe categoria para compra de investimento~~ | ✅ migration `0003`: raiz `Investimentos` com `kind = TRANSFER`, cinco classes de ativo |
+| **A fronteira principal × rendimento depende do prompt** | regra 4 do `SYSTEM_PROMPT`; mexer nela sem conferir "Valor recebido de Investimentos" transforma receita em transferência |
+| **"Pension"/"Retirement" e "Automatic investment" ficaram sem de/para** | duas categorias da Pluggy disputando uma nossa; `pluggy_category_id` é coluna única |
+| ~~`Pix recebido` é `TRANSFER` e engole receita~~ | ✅ migration `0004`: movido para `Receitas` (`INCOME`); a receita reconhecida foi de <1% para ~100% do que entrou |
+| **`Pix enviado` continua `TRANSFER`** | espelho não resolvido: pagar alguém por serviço é despesa. A regra 3b manda preferir a categoria do que foi pago, mas o resto fica fora dos gastos |
+| **O laço de aprendizado não existe** | o LLM não vê as correções `MANUAL`; realimentar é a pipeline híbrida, e depende da tela da Fase 4 para haver o que aprender |
+| **Limiar `LOW_CONFIDENCE = 0.70` continua sem calibração** | ele *dispara* (45 dos 96 `NEEDS_REVIEW`), mas se `0.450` erra mais que `0.950` só as correções `MANUAL` dirão |
+| Descrição corrigida na origem não invalida a categoria já gravada | escape é `POST /categorization/reset`, não invalidação automática |
+| O lock de categorização é por processo, como o do sync | ambos deixam de valer com `uvicorn --workers > 1` |

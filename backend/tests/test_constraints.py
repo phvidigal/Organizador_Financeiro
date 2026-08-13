@@ -194,6 +194,98 @@ async def test_resync_preserves_manual_category(admin_session, tenants, account_
     assert row.category_source == "MANUAL"
 
 
+async def test_resync_preserves_llm_category(admin_session, tenants, account_a) -> None:
+    """O que a Fase 3 acrescenta ao teste acima.
+
+    Preservar só `MANUAL` era suficiente enquanto nada mais categorizava. Com o LLM
+    gravando `category_source = 'LLM'`, o predicado antigo faria **todo re-sync
+    apagar a categorização e reverter o `kind`** — e como a Pluggy coleta sozinha a
+    cada ~24h, isso seria o histórico inteiro reprocessado por dia, pagando GPU para
+    chegar ao mesmo resultado. Sem erro e sem log.
+
+    O `kind` entra na asserção de propósito: é ele que tira a transferência do total
+    de gastos, e revertê-lo é o estrago que menos aparece.
+    """
+    tenant_a, _ = tenants
+
+    transfer_category_id = await admin_session.scalar(
+        text("SELECT id FROM categories WHERE name = 'Pagamento de cartão' LIMIT 1")
+    )
+
+    await upsert_external_transactions(
+        admin_session, [pluggy_row(tenant_a, account_a, "tx-llm")]
+    )
+    await admin_session.commit()
+
+    # O job da Fase 3 decide: é pagamento de fatura, logo TRANSFER.
+    await admin_session.execute(
+        text(
+            "UPDATE transactions SET category_id = :c, category_source = 'LLM', "
+            "categorization_status = 'CATEGORIZED', category_confidence = 0.910, "
+            "kind = 'TRANSFER' WHERE external_id = 'tx-llm'"
+        ),
+        {"c": str(transfer_category_id)},
+    )
+    await admin_session.commit()
+
+    # A Pluggy re-sincroniza. O mapeador nunca emite colunas de categoria, então o
+    # lote traz `categorization_status = 'PENDING'` e nada mais.
+    await upsert_external_transactions(
+        admin_session,
+        [pluggy_row(tenant_a, account_a, "tx-llm", amount=Decimal("-77.00"))],
+    )
+    await admin_session.commit()
+
+    row = (
+        await admin_session.execute(
+            text(
+                "SELECT amount, category_id, category_source, categorization_status, "
+                "category_confidence, kind FROM transactions WHERE external_id = 'tx-llm'"
+            )
+        )
+    ).one()
+
+    assert row.amount == Decimal("-77.00")
+    assert row.category_id == transfer_category_id
+    assert row.category_source == "LLM"
+    assert row.categorization_status == "CATEGORIZED"
+    assert row.category_confidence == Decimal("0.910")
+    assert row.kind == "TRANSFER"
+
+
+async def test_resync_requeues_transaction_without_source(
+    admin_session, tenants, account_a
+) -> None:
+    """A contrapartida: linha sem `category_source` volta para a fila.
+
+    É o caminho de recuperação de uma transação marcada FAILED porque o Ollama
+    estava fora do ar. `store.apply_decision` deixa `category_source` NULL nesse
+    caso exatamente para que o próximo sync a re-enfileire sozinha.
+    """
+    tenant_a, _ = tenants
+
+    await upsert_external_transactions(
+        admin_session, [pluggy_row(tenant_a, account_a, "tx-failed")]
+    )
+    await admin_session.execute(
+        text(
+            "UPDATE transactions SET categorization_status = 'FAILED' "
+            "WHERE external_id = 'tx-failed'"
+        )
+    )
+    await admin_session.commit()
+
+    await upsert_external_transactions(
+        admin_session, [pluggy_row(tenant_a, account_a, "tx-failed")]
+    )
+    await admin_session.commit()
+
+    status = await admin_session.scalar(
+        text("SELECT categorization_status FROM transactions WHERE external_id = 'tx-failed'")
+    )
+    assert status == "PENDING"
+
+
 # ---------------------------------------------------------------------------
 # (b) Origens sem identificador — CSV e entrada manual
 # ---------------------------------------------------------------------------

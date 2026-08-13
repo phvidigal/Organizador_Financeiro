@@ -107,7 +107,8 @@ async def test_seed_creates_default_tenant_and_categories(admin_session) -> None
     children = await admin_session.scalar(
         text("SELECT count(*) FROM categories WHERE parent_id IS NOT NULL AND is_system")
     )
-    assert roots == 11
+    # 11 da migration inicial + "Investimentos" (0003).
+    assert roots == 12
     assert children > 0
 
     # O de/para com a taxonomia da Pluggy é preenchido na Fase 2, a partir de
@@ -117,3 +118,38 @@ async def test_seed_creates_default_tenant_and_categories(admin_session) -> None
         text("SELECT count(*) FROM categories WHERE pluggy_category_id IS NOT NULL")
     )
     assert unmapped == 0
+
+
+async def test_investment_tree_is_transfer_not_expense(admin_session) -> None:
+    """Aplicar não é gastar, resgatar não é receber.
+
+    Se a árvore nascesse EXPENSE, um mês com R$ 5.000 aplicados apareceria como
+    R$ 5.000 de gasto — e o resgate dos mesmos R$ 5.000, depois, como receita. O
+    mesmo dinheiro contado duas vezes é exatamente o que o campo `kind` existe
+    para evitar.
+    """
+    rows = (
+        await admin_session.execute(
+            text(
+                "SELECT c.name, c.kind FROM categories c "
+                "LEFT JOIN categories p ON p.id = c.parent_id "
+                "WHERE c.name = 'Investimentos' OR p.name = 'Investimentos'"
+            )
+        )
+    ).all()
+
+    assert {row.name for row in rows} == {
+        "Investimentos",
+        "Renda fixa",
+        "Renda variável",
+        "Fundos de investimento",
+        "Criptoativos",
+        "Previdência privada",
+    }
+    assert {row.kind for row in rows} == {"TRANSFER"}
+
+    # O rendimento é dinheiro novo e continua sendo receita, numa árvore separada.
+    yield_kind = await admin_session.scalar(
+        text("SELECT kind FROM categories WHERE name = 'Rendimentos e investimentos'")
+    )
+    assert yield_kind == "INCOME"

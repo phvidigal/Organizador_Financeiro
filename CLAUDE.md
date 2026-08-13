@@ -4,9 +4,9 @@ SaaS de finanças pessoais: agregação via Open Finance (Pluggy), categorizaç�
 LLM self-hosted (Ollama), multi-tenancy com RLS e conformidade com a LGPD.
 Uso pessoal, um único tenant ativo, schema já preparado para vários.
 
-**Estado:** Fases 0 a 2 concluídas (infra, schema, integração Pluggy). Fase 3
-(categorização por LLM) é a próxima. O roadmap completo e o racional das decisões
-estão no [README](README.md).
+**Estado:** Fases 0 a 3 concluídas (infra, schema, integração Pluggy,
+categorização por LLM). Fase 4 (frontend) é a próxima. O roadmap completo e o
+racional das decisões estão no [README](README.md).
 
 Idioma: código e schema em inglês; comentários, docs e conteúdo de usuário em
 pt-BR. Commits em pt-BR.
@@ -24,27 +24,37 @@ pt-BR. Commits em pt-BR.
 Essas funções carregam três regras que não estão em constraint nenhuma:
 
 - re-sync **não** sobrescreve `category_id`, `category_source`,
-  `categorization_status`, `category_confidence` nem `kind` quando
-  `category_source = 'MANUAL'`;
+  `categorization_status`, `category_confidence` nem `kind` de linha que já tem
+  `category_source` (`keep_if_decided`, qualquer origem — não só `MANUAL`);
 - re-sync **ressuscita** linha soft-deleted (`deleted_at = NULL`);
 - `kind` é derivado do sinal do valor quando o chamador não informa.
+
+A primeira regra vale para **qualquer** `category_source`, e não só `MANUAL`,
+porque `map_transaction` não emite as colunas de categoria: o `excluded.<col>`
+delas vale NULL e o status volta como `PENDING`. Com o predicado restrito a
+`MANUAL`, cada coleta automática da Pluggy — a cada ~24h — devolveria o histórico
+inteiro para a fila, queimando GPU para reproduzir a mesma resposta, sem erro e
+sem log.
+
+A contrapartida importa: linha com `category_source IS NULL` **volta** para
+`PENDING`. É como uma transação marcada `FAILED` (Ollama fora do ar) se
+re-enfileira sozinha — e é por isso que `store.apply_decision` deixa
+`category_source` NULL nesse caso, e só nesse.
 
 O caminho ponta a ponta (resposta da Pluggy → banco) está coberto em
 `tests/test_pluggy_sync.py`, sob a conexão `app_user` — e não só via
 `ingestion.py`, porque um sync com `INSERT` próprio passaria verde nos testes
 daquele módulo e quebraria as três regras em silêncio.
 
-### ⚠️ Armadilha esperando a Fase 3
+### 1b. Gravação de categorização passa por `app/services/categorization/store.py`
 
-`keep_if_manual` protege só `category_source = 'MANUAL'`. Para tudo mais, o
-re-sync traz `categorization_status = 'PENDING'` de volta — inclusive em linhas
-que o LLM já tiver categorizado.
+`apply_decision` grava seis colunas de uma vez: `category_id`, `category_source`,
+`categorization_status`, `category_confidence`, `categorized_at` e **`kind`**. A
+última é a que se esquece, e é a que importa para o dashboard — sem herdá-la de
+`categories.kind`, um pagamento de fatura classificado como "Transferências"
+continua contando como gasto.
 
-Na Fase 2 isso é inócuo, porque nada categoriza ainda. **Na Fase 3 vira
-reprocessamento do histórico inteiro a cada sync**, com custo de GPU e nenhum
-sinal visível de que algo está errado. A correção é em `ingestion.py` (preservar
-quando `category_source IS NOT NULL`, não só quando é `MANUAL`) e o lugar de
-fazê-la é o começo da Fase 3.
+`reset_categorization` é o caminho inverso, e recusa `MANUAL`.
 
 ### 2. Acesso a dado de tenant passa por `get_tenant_session`
 
@@ -125,8 +135,8 @@ docker compose exec backend ruff check . --fix
   `pytestmark = pytest.mark.asyncio(loop_scope="session")` no topo, senão o
   asyncpg quebra com "attached to a different loop". Teste síncrono não pode
   ficar num módulo com esse marcador — use `tests/test_ingestion_pure.py`,
-  `tests/test_pluggy_pure.py`, `tests/test_pluggy_mappers.py` ou
-  `tests/test_config.py`.
+  `tests/test_pluggy_pure.py`, `tests/test_pluggy_mappers.py`,
+  `tests/test_categorization_pure.py` ou `tests/test_config.py`.
 - **`docker compose restart` não relê o `.env`.** As variáveis são injetadas na
   criação do container; depois de editar o arquivo é
   `docker compose up -d --force-recreate backend`. E `get_settings()` é
@@ -197,19 +207,92 @@ devolve valor de segredo, só nomes de campo.
   descartar uma ocorrência legítima. Só importa se a importação OFX/CSV virar
   caminho principal — o sync da Pluggy não usa esse caminho.
 
-## Fases 3 a 5
+---
+
+## Fase 3 — como a categorização funciona
+
+Uma chamada ao Ollama por transação, com a categoria restrita por JSON Schema.
+Mesma fronteira de camadas da Fase 2, e pelo mesmo motivo:
+
+| Módulo (`app/services/categorization/`) | Muda quando | Conhece |
+|---|---|---|
+| `client.py` | a API do Ollama muda | httpx |
+| `catalog.py` | a taxonomia muda | SQLAlchemy (só leitura) |
+| `prompt.py` | o prompt ou o schema mudam | nada (puro) |
+| `decide.py` | a regra de `NEEDS_REVIEW` muda | nada (puro) |
+| `store.py` | as colunas de categorização mudam | SQLAlchemy |
+| `job.py` | a orquestração muda | todos acima |
+| `runner.py` | — | é a única parte que fala com o event loop |
+
+O que é fácil de quebrar sem saber:
+
+- **O `enum` do schema é o que garante a categoria.** `build_schema` põe os
+  rótulos do tenant dentro de `format`, e o Ollama restringe a gramática da
+  geração a eles — resposta fora da taxonomia deixa de ser possível. Trocar por
+  string livre reintroduz o parsing que este desenho existe para evitar.
+- **Rótulo é qualificado** (`"Alimentação > Delivery"`). O índice único é
+  `(tenant_id, parent_id, name)`, então nome cru pode ser ambíguo.
+- **`kind` é herdado de `categories.kind`** ao gravar (ver invariante 1b).
+- **Dois eixos de falha, e confundi-los custa caro.** `FAILED` é infraestrutura;
+  `NEEDS_REVIEW` é conteúdo. Ollama fora do ar aborta a execução e deixa as linhas
+  `PENDING` — marcar centenas como `FAILED` exigiria um reset para recuperar.
+- **Uma unidade de trabalho por transação**, e nenhuma chamada HTTP com transação
+  de banco aberta. É o que torna o job retomável.
+- **Concorrência 1.** O Ollama serializa requisições por padrão: paralelismo não
+  acelera, só enfileira.
+- **A confiança gravada é a crua do modelo.** A concordância com a Pluggy entra na
+  *decisão*, nunca no número — misturar destruiria o dado que a Fase 4 precisa
+  para medir a calibração contra as correções `MANUAL`.
+
+Endpoints: `POST /categorization/run` (202, `limit` opcional),
+`GET /categorization/status`, `POST /categorization/reset` (`source`, recusa
+`MANUAL`). O sync encadeia a categorização ao terminar em `SUCCESS` com escrita —
+o gancho é `_chain_categorization` em `app/api/v1/connections.py`, e mora lá, e não
+em `pluggy/runner.py`, porque aquele pacote não deve conhecer a Fase 3.
+
+### Limitações conhecidas
+
+- **Descrição corrigida na origem não invalida a categoria.** O re-sync preserva a
+  decisão; reprocessar é `POST /categorization/reset`.
+- **O lock é por processo**, chaveado por tenant. Mesma ressalva do sync com
+  `uvicorn --workers > 1`.
+- **Os dois sinais de `NEEDS_REVIEW` pesam quase igual — não remova nenhum.**
+  🔬 Nas 333 transações reais: 51 vieram de discordância com a Pluggy, 45 de
+  confiança abaixo de `LOW_CONFIDENCE = 0.70`. O `qwen3.5:9b` responde `0.950` na
+  maioria (269 de 333), mas também `0.650`, `0.450` e `0.150` quando a descrição
+  é genérica. Uma amostra de dez sugeriu que o número era constante; não era.
+- **`Pix recebido` é `INCOME` e mora sob `Receitas`** (migration 0004), não sob
+  `Transferências`. 🔬 Sob a raiz antiga, mais de 99% do dinheiro que entrava
+  ficava fora dos totais e `Receitas` só via rendimento de investimento. O caso de
+  conta própria tem casa separada:
+  `Transferências > Transferência entre contas próprias`.
+- **A confiança é o canal de pergunta do LLM.** Só o titular sabe quem é o
+  remetente de um Pix, então a regra 3c do `SYSTEM_PROMPT` manda usar confiança
+  abaixo de 0.5 quando a descrição não decide — o que joga a linha em
+  `NEEDS_REVIEW` em vez de cravar. 🔬 Funciona: os 32 `Pix recebido` reais foram
+  todos para revisão, e os 15 `Transferência entre contas próprias` (mesmo nome no
+  remetente) passaram direto. Afrouxar essa regra transforma pergunta em palpite.
+- **`Pix enviado` continua `TRANSFER`**, e é o espelho não resolvido: pagar alguém
+  por serviço é despesa. A regra 3b manda preferir a categoria do que foi pago,
+  mas quem sobra em `Pix enviado` sem motivo conhecido continua fora dos gastos.
+- **`Investimentos` é `TRANSFER`, e a distinção com o rendimento é frágil.**
+  Aplicar/resgatar move o principal (`Investimentos > …`, TRANSFER); juros e
+  dividendos são dinheiro novo (`Receitas > Rendimentos e investimentos`, INCOME).
+  A regra 4 do `SYSTEM_PROMPT` é o que separa as duas — mexer nela sem conferir
+  "Valor recebido de Investimentos" transforma receita em transferência.
+
+## Fases 4 e 5
 
 Contexto acumulado em [`docs/fases-3-5.md`](docs/fases-3-5.md): o que já está
-decidido e o que segue em aberto na categorização por LLM, no frontend e na LGPD.
-**Nada disso está implementado** — leia antes de projetar algo que já tem decisão
-tomada, mas não comece uma fase seguinte sem o usuário pedir.
+decidido e o que segue em aberto no frontend e na LGPD. **Nada disso está
+implementado** — leia antes de projetar algo que já tem decisão tomada, mas não
+comece uma fase seguinte sem o usuário pedir.
 
-Três destaques, porque são fáceis de errar sem ler:
+Dois destaques, porque são fáceis de errar sem ler:
 
-- o Ollama aceita **JSON Schema** no parâmetro `format`, então a categoria é saída
-  restrita por schema, não texto a ser parseado;
-- ao categorizar, o `kind` tem de ser herdado de `categories.kind` junto com a
-  categoria — esquecer deixa transferência contando como gasto;
+- a **tela de revisão** é a mais importante da Fase 4, e não por UX: é ela que
+  produz `category_source = 'MANUAL'`, que é a única régua para medir o acerto do
+  LLM. Precisa permitir ajustar o `kind`, não só a categoria;
 - **não existe autenticação**; `X-Tenant-Id` é confiado cegamente e só há recusa
   quando `ENVIRONMENT=production`.
 

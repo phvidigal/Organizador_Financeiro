@@ -300,6 +300,64 @@ async def test_resync_preserves_a_manual_categorization(
     assert row.amount == Decimal("1500.00")
 
 
+async def test_resync_preserves_a_llm_categorization(
+    connection_a, admin_session, tenants, app_tenant_session
+) -> None:
+    """A mesma regressão, agora para a decisão do LLM.
+
+    Testado aqui **além** de `test_constraints.py` porque um sync com `INSERT`
+    próprio passaria verde lá e quebraria aqui: é este o caminho ponta a ponta
+    resposta-da-Pluggy → banco.
+
+    Sem a preservação, cada coleta automática da Pluggy — a cada ~24h — devolveria o
+    histórico inteiro para a fila. Nenhum erro, nenhum log, só GPU queimando todo
+    dia para reproduzir a mesma resposta.
+    """
+    tenant_a, _ = tenants
+    category_id = uuid.uuid4()
+    await admin_session.execute(
+        text(
+            "INSERT INTO categories (id, tenant_id, name, kind) "
+            "VALUES (:id, :tenant_id, 'Transferência do LLM', 'TRANSFER')"
+        ),
+        {"id": str(category_id), "tenant_id": str(tenant_a)},
+    )
+    await admin_session.commit()
+
+    await run_sync(connection_a, app_tenant_session)
+
+    # O job da Fase 3 decide, com confiança alta.
+    async with app_tenant_session(TENANT_A) as session:
+        await session.execute(
+            text(
+                "UPDATE transactions SET category_id = :c, category_source = 'LLM', "
+                "categorization_status = 'CATEGORIZED', category_confidence = 0.880, "
+                "kind = 'TRANSFER' WHERE external_id = :e"
+            ),
+            {"c": str(category_id), "e": "aaaaaaa1-0000-0000-0000-000000000002"},
+        )
+
+    await run_sync(connection_a, app_tenant_session, _routes_with_corrected_transaction())
+
+    async with app_tenant_session(TENANT_A) as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT category_id, category_source, categorization_status, kind, "
+                    "category_confidence, amount FROM transactions WHERE external_id = :e"
+                ),
+                {"e": "aaaaaaa1-0000-0000-0000-000000000002"},
+            )
+        ).one()
+
+    assert row.category_id == category_id
+    assert row.category_source == "LLM"
+    assert row.categorization_status == CategorizationStatus.CATEGORIZED
+    assert row.kind == TransactionKind.TRANSFER
+    assert row.category_confidence == Decimal("0.880")
+    assert row.amount == Decimal("1500.00")
+
+
 async def test_second_sync_asks_only_for_what_was_created_since(
     connection_a, app_tenant_session
 ) -> None:

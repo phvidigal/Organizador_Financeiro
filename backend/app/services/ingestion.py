@@ -22,7 +22,7 @@ from sqlalchemy import case
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import CategorySource, TransactionKind
+from app.models.enums import TransactionKind
 from app.models.transaction import Transaction
 
 _WHITESPACE = re.compile(r"\s+")
@@ -155,8 +155,8 @@ async def upsert_external_transactions(
     categorização, essa correção é o dado mais valioso do sistema — é a base de
     regras e de treino que as Fases 3 e 4 querem gerar. Uma re-sincronização
     sobrescrevendo-a com o palpite da Pluggy apagaria esse trabalho em silêncio,
-    sem erro e sem log. Daí o CASE: linhas com `category_source = 'MANUAL'`
-    preservam a categoria, e todo o resto é atualizado normalmente.
+    sem erro e sem log. Daí o CASE: linha que já tem `category_source` preserva a
+    categorização, e todo o resto é atualizado normalmente.
     """
     if not rows:
         return 0
@@ -169,10 +169,24 @@ async def upsert_external_transactions(
 
     # Dentro do ON CONFLICT, `Transaction.<col>` é o valor já gravado e
     # `stmt.excluded.<col>` é o que a sincronização trouxe.
-    is_manual = Transaction.category_source == CategorySource.MANUAL
+    #
+    # O predicado é "alguém já decidiu", e não "o usuário decidiu": `MANUAL` era
+    # suficiente enquanto nada mais categorizava, mas `PLUGGY`, `RULE`,
+    # `EMBEDDING` e `LLM` também são decisões tomadas. E como `map_transaction`
+    # não emite as colunas de categoria, o `excluded.<col>` delas vale NULL e o
+    # `categorization_status` volta como PENDING — ou seja, com o predicado antigo
+    # **todo re-sync apagaria a categorização do LLM e reverteria o `kind`**, sem
+    # erro e sem log. Com a coleta automática da Pluggy a cada ~24h, isso seria o
+    # histórico inteiro reprocessado por dia, pagando GPU para chegar ao mesmo
+    # resultado.
+    #
+    # Linha com `category_source IS NULL` continua voltando para PENDING, o que é
+    # desejado: é assim que uma transação marcada FAILED (Ollama fora do ar) se
+    # re-enfileira sozinha na próxima sincronização.
+    already_decided = Transaction.category_source.isnot(None)
 
-    def keep_if_manual(column: str):
-        return case((is_manual, getattr(Transaction, column)), else_=stmt.excluded[column])
+    def keep_if_decided(column: str):
+        return case((already_decided, getattr(Transaction, column)), else_=stmt.excluded[column])
 
     # Só as colunas que o lote realmente traz. `excluded` expõe a tabela inteira,
     # então incluir uma coluna ausente do INSERT a sobrescreveria com o default
@@ -193,14 +207,15 @@ async def upsert_external_transactions(
             # apontando para a Pluggy, e a métrica de acerto da Fase 4 sairia errada.
             #
             # `kind` entra no grupo porque marcar um Pix como transferência é
-            # decisão do usuário tanto quanto escolher a categoria — e um re-sync
-            # revertendo-o para EXPENSE traria o valor de volta para o total de
-            # gastos sem nenhum sinal de que algo mudou.
-            "category_id": keep_if_manual("category_id"),
-            "category_source": keep_if_manual("category_source"),
-            "categorization_status": keep_if_manual("categorization_status"),
-            "category_confidence": keep_if_manual("category_confidence"),
-            "kind": keep_if_manual("kind"),
+            # decisão tanto quanto escolher a categoria — o `kind` é herdado de
+            # `categories.kind` na categorização — e um re-sync revertendo-o para
+            # EXPENSE traria o valor de volta para o total de gastos sem nenhum
+            # sinal de que algo mudou.
+            "category_id": keep_if_decided("category_id"),
+            "category_source": keep_if_decided("category_source"),
+            "categorization_status": keep_if_decided("categorization_status"),
+            "category_confidence": keep_if_decided("category_confidence"),
+            "kind": keep_if_decided("kind"),
             # Ressuscita a linha. `deleted_at` marca "sumiu na origem"; se a
             # instituição voltou a reportar a transação, ela existe de novo e
             # esconder do extrato seria mostrar um saldo que não fecha.

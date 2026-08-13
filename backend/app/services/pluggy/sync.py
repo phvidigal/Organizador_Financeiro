@@ -77,6 +77,11 @@ class SyncOutcome:
     """Resumo de uma execução. Vive em memória; o que é durável está no banco."""
 
     connection_id: uuid.UUID
+    # Redundante em relação à conexão, mas necessário: quem encadeia a
+    # categorização é o `done_callback` do runner, que só recebe a task — e
+    # descobrir o tenant dali exigiria abrir uma sessão de banco num callback
+    # síncrono. Ver `pluggy/runner.py::_finalize`.
+    tenant_id: uuid.UUID
     started_at: datetime
     status: SyncStatus = "SUCCESS"
     finished_at: datetime | None = None
@@ -116,7 +121,9 @@ async def sync_connection(
     exceção que escapa dali só aparece como "Task exception was never retrieved".
     """
     started_at = now()
-    outcome = SyncOutcome(connection_id=connection_id, started_at=started_at)
+    outcome = SyncOutcome(
+        connection_id=connection_id, tenant_id=tenant_id, started_at=started_at
+    )
     phase = "carregar conexão"
     item_status_written = False
 

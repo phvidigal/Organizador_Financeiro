@@ -70,8 +70,8 @@ async def test_seeded_categories_declare_their_kind(admin_session) -> None:
     assert kinds["Transferências"] == "TRANSFER"
     assert kinds["Alimentação"] == "EXPENSE"
 
-    # Subcategoria herda a raiz: não faz sentido "Pix enviado" ser TRANSFER e
-    # "Pix recebido" ser outra coisa.
+    # Subcategoria herda a raiz, sem exceção: é isso que permite ao job gravar o
+    # `kind` sem conhecer nome de categoria.
     filhos_transferencia = (
         await admin_session.execute(
             text(
@@ -81,6 +81,37 @@ async def test_seeded_categories_declare_their_kind(admin_session) -> None:
         )
     ).scalars().all()
     assert filhos_transferencia == ["TRANSFER"]
+
+
+async def test_pix_recebido_is_income_not_transfer(admin_session) -> None:
+    """A correção que a primeira rodada completa exigiu (migration 0004).
+
+    Sob `Transferências`, "Pix recebido" tratava **todo** Pix recebido como dinheiro
+    andando entre contas do próprio titular — premissa falsa para quem recebe
+    pagamento por Pix. Num extrato real isso pôs mais de 99% do dinheiro que
+    entrava fora dos totais, deixando `Receitas` só com rendimento de investimento.
+
+    O caso legítimo de conta própria continua tendo casa, e é ela que precisa
+    sobreviver a esta mudança.
+    """
+    rows = dict(
+        (
+            await admin_session.execute(
+                text(
+                    "SELECT c.name, p.name FROM categories c "
+                    "JOIN categories p ON p.id = c.parent_id "
+                    "WHERE c.name IN ('Pix recebido', 'Transferência entre contas próprias')"
+                )
+            )
+        ).all()
+    )
+    assert rows["Pix recebido"] == "Receitas"
+    assert rows["Transferência entre contas próprias"] == "Transferências"
+
+    kind = await admin_session.scalar(
+        text("SELECT kind FROM categories WHERE name = 'Pix recebido'")
+    )
+    assert kind == "INCOME"
 
 
 async def test_transfer_is_excluded_from_expense_total(
