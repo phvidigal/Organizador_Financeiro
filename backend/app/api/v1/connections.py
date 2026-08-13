@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_pluggy_client
+from app.api.deps import get_ollama_client, get_pluggy_client
 from app.core.tenancy import get_tenant_session, resolve_tenant_id
 from app.models.bank_connection import BankConnection
 from app.schemas.connection import (
@@ -18,10 +18,12 @@ from app.schemas.connection import (
     SyncOutcomeRead,
     SyncStatusRead,
 )
+from app.services.categorization import runner as categorization_runner
 from app.services.pluggy import runner
 from app.services.pluggy.client import PluggyClient
 from app.services.pluggy.errors import PluggyNotFoundError
 from app.services.pluggy.mappers import map_item
+from app.services.pluggy.sync import SyncOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,31 @@ router = APIRouter(prefix="/connections", tags=["connections"])
 # cada ~24h (ver `next_auto_sync_at`): sincronizar mais que isso relê exatamente o
 # mesmo conteúdo e gasta cota. O `force=true` existe para desenvolvimento.
 MIN_SYNC_INTERVAL = timedelta(minutes=10)
+
+# Categorizar automaticamente o que o sync trouxe.
+#
+# Parâmetro e não código removido, no molde de `REQUEST_REFRESH_BY_DEFAULT`: sem
+# isto, transação nova só sairia de PENDING quando alguém lembrasse de chamar
+# `/categorization/run` — e o dashboard mostraria gasto onde havia transferência.
+CATEGORIZE_AFTER_SYNC = True
+
+
+def _chain_categorization(outcome: SyncOutcome) -> None:
+    """Gancho de pós-sync: enfileira a categorização do que acabou de entrar.
+
+    Mora aqui, e não em `pluggy/runner.py`, porque é esta camada que conhece as duas
+    fases — o pacote da Pluggy não deve saber que existe categorização por LLM.
+
+    Só quando houve escrita: um sync que releu as mesmas transações não gera fila
+    nova, e disparar o job à toa custaria uma consulta e um log a cada coleta.
+    """
+    if not CATEGORIZE_AFTER_SYNC or outcome.transactions_upserted == 0:
+        return
+    started = categorization_runner.schedule_categorization(
+        tenant_id=outcome.tenant_id, client=get_ollama_client()
+    )
+    if not started:
+        logger.info("categorização do tenant %s já estava em andamento", outcome.tenant_id)
 
 
 async def _get_connection(session: AsyncSession, connection_id: uuid.UUID) -> BankConnection:
@@ -142,7 +169,12 @@ async def adopt_item(
 
     await session.flush()
 
-    runner.schedule_sync(tenant_id=tenant_id, connection_id=connection.id, client=client)
+    runner.schedule_sync(
+        tenant_id=tenant_id,
+        connection_id=connection.id,
+        client=client,
+        on_success=_chain_categorization,
+    )
     return connection
 
 
@@ -210,7 +242,11 @@ async def start_sync(
     await session.flush()
 
     started = runner.schedule_sync(
-        tenant_id=tenant_id, connection_id=connection_id, client=client, full=full
+        tenant_id=tenant_id,
+        connection_id=connection_id,
+        client=client,
+        full=full,
+        on_success=_chain_categorization,
     )
     if not started:
         # Já havia um sync desta conexão em andamento neste processo.

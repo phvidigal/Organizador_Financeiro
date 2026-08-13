@@ -5,6 +5,7 @@ from functools import lru_cache
 from fastapi import HTTPException, status
 
 from app.core.config import get_settings
+from app.services.categorization.client import OllamaClient
 from app.services.pluggy.client import PluggyClient
 
 
@@ -48,3 +49,27 @@ async def close_pluggy_client() -> None:
     if _pluggy_singleton.cache_info().currsize:
         await _pluggy_singleton().aclose()
         _pluggy_singleton.cache_clear()
+
+
+@lru_cache
+def _ollama_singleton() -> OllamaClient:
+    """Um cliente para o processo inteiro, pelo pool de conexões do httpx.
+
+    Sem o `503` que o cliente da Pluggy tem: o Ollama não tem credencial para estar
+    faltando. Se ele estiver fora do ar, quem descobre é a execução do job — que
+    aborta deixando as transações na fila — e o diagnóstico é `GET /health/ollama`.
+    """
+    settings = get_settings()
+    return OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model)
+
+
+def get_ollama_client() -> OllamaClient:
+    """Cliente do Ollama. Também usado fora de request, no gancho de pós-sync."""
+    return _ollama_singleton()
+
+
+async def close_ollama_client() -> None:
+    """Fecha o pool do cliente no shutdown. Chamado pelo lifespan."""
+    if _ollama_singleton.cache_info().currsize:
+        await _ollama_singleton().aclose()
+        _ollama_singleton.cache_clear()

@@ -80,6 +80,26 @@ PLUGGY_TO_LOCAL: dict[str, str] = {
     "Taxes": "Impostos",
     "Interests charged": "Juros e encargos",
     "Insurance": "Seguros",
+    # --- Investimentos ---
+    # 🔬 "Investments" e "Fixed income" apareceram no extrato real. A Pluggy trata
+    # investimento como *gasto*; nós tratamos como TRANSFER (ver a migration
+    # 0003). O de/para liga as duas taxonomias mesmo assim — ele existe para
+    # comparar palpites, não para importar a semântica deles.
+    #
+    # Ficam de fora, e cada uma por um motivo:
+    # - "Automatic investment" e "Taxes on investments" disputariam "Investimentos"
+    #   e "Impostos" com pares melhores. Duas da Pluggy para uma nossa é conflito,
+    #   e o de/para recusa os dois lados em vez de deixar a ordem do dicionário
+    #   decidir;
+    # - "Pension" e "Retirement" disputariam "Previdência privada", e qual das
+    #   duas significa PGBL/VGBL contra aposentadoria do INSS não dá para afirmar
+    #   sem medir. Mapeamento errado é pior que mapeamento faltando: o faltando
+    #   aparece no relatório, o errado vira "concordância" inventada;
+    # - "Criptoativos" não tem contraparte na taxonomia deles.
+    "Investments": "Investimentos",
+    "Fixed income": "Renda fixa",
+    "Variable income": "Renda variável",
+    "Mutual funds": "Fundos de investimento",
     # --- Transferências ---
     # "Transfer - PIX" fica de fora: a Pluggy não distingue enviado de recebido, e
     # nós distinguimos. A direção está no sinal do valor, não na categoria.

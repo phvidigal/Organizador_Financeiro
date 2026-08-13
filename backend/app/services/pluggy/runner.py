@@ -17,6 +17,7 @@ inofensivos, mas dobram a cota consumida na Pluggy. O compose roda um worker.
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 
 from app.core.tenancy import TenantSessionScope, tenant_session
 from app.services.pluggy.client import PluggyClient
@@ -32,6 +33,14 @@ logger = logging.getLogger(__name__)
 # um novo disparo é recusado.
 _tasks: dict[uuid.UUID, asyncio.Task[SyncOutcome]] = {}
 _last_outcome: dict[uuid.UUID, SyncOutcome] = {}
+
+# O que fazer quando um sync termina bem — na prática, encadear a categorização.
+#
+# É um gancho, e não um `import` da categorização aqui dentro, porque este pacote
+# não deve conhecer a Fase 3: quem sabe ligar as duas coisas é a camada de API, que
+# já conhece as duas. Ver `app/api/v1/connections.py`.
+SyncCallback = Callable[[SyncOutcome], None]
+_on_success: dict[uuid.UUID, SyncCallback] = {}
 
 
 def is_running(connection_id: uuid.UUID) -> bool:
@@ -56,8 +65,13 @@ def schedule_sync(
     session_scope: TenantSessionScope = tenant_session,
     full: bool = False,
     request_refresh: bool = REQUEST_REFRESH_BY_DEFAULT,
+    on_success: SyncCallback | None = None,
 ) -> bool:
-    """Agenda um sync. Devolve `False` se já houver um em andamento."""
+    """Agenda um sync. Devolve `False` se já houver um em andamento.
+
+    `on_success` roda no `done_callback`, com o `SyncOutcome` já pronto, e só quando
+    a execução termina em `SUCCESS`. É por onde a categorização é encadeada.
+    """
     if is_running(connection_id):
         return False
 
@@ -77,6 +91,8 @@ def schedule_sync(
     # para a task: sem dono, ela pode ser coletada no meio da execução e o sync
     # simplesmente para — sem erro, sem log, de forma intermitente.
     _tasks[connection_id] = task
+    if on_success is not None:
+        _on_success[connection_id] = on_success
     task.add_done_callback(_finalize)
     return True
 
@@ -89,6 +105,7 @@ def _finalize(task: asyncio.Task[SyncOutcome]) -> None:
     sem contexto nenhum.
     """
     connection_id = next((cid for cid, t in list(_tasks.items()) if t is task), None)
+    callback = _on_success.pop(connection_id, None) if connection_id is not None else None
     if connection_id is not None:
         _tasks.pop(connection_id, None)
 
@@ -100,8 +117,19 @@ def _finalize(task: asyncio.Task[SyncOutcome]) -> None:
         logger.error("task de sync terminou com exceção", exc_info=exc)
         return
 
+    outcome = task.result()
     if connection_id is not None:
-        _last_outcome[connection_id] = task.result()
+        _last_outcome[connection_id] = outcome
+
+    if callback is None or outcome.status != "SUCCESS":
+        return
+    try:
+        callback(outcome)
+    except Exception:
+        # O sync já terminou e já está gravado. Uma falha ao encadear o passo
+        # seguinte não pode virar "Task exception was never retrieved" nem apagar o
+        # resultado que acabou de ser registrado.
+        logger.exception("gancho de pós-sync falhou para a conexão %s", connection_id)
 
 
 async def shutdown_sync_tasks(timeout: float = 5.0) -> None:
@@ -117,3 +145,4 @@ async def shutdown_sync_tasks(timeout: float = 5.0) -> None:
     if pending:
         await asyncio.wait(pending, timeout=timeout)
     _tasks.clear()
+    _on_success.clear()
