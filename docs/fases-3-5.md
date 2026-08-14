@@ -248,7 +248,7 @@ transferência. Todas contavam como gasto.
 
 ---
 
-## Fase 4 — Frontend · 🛠️ tela de revisão implementada, dashboard não
+## Fase 4 — Frontend · 🛠️ implementada
 
 ### Três telas
 
@@ -327,10 +327,45 @@ fila está errada.
 ✅ Não some `amount` sem filtrar `kind`. `TRANSFER` fora dos totais de receita e
 despesa — é a razão de o campo existir.
 
-⚠️ Os índices atuais são `(tenant_id, account_id, date DESC)` e
-`(tenant_id, date DESC)`. Um índice que inclua `kind` **não** foi criado de
-propósito: índice custa escrita em todo sync, e sem a query real do dashboard
-seria especulação. Medir com `EXPLAIN ANALYZE` na Fase 4 e só então decidir.
+🛠️ `GET /dashboard/summary`, com a aritmética separada em
+`app/services/dashboard.py` para poder ser testada sem banco — mesma fronteira de
+`catalog.build_catalog` × `load_catalog`.
+
+🔬 **E o dashboard revelou o número que faltava para entender a Fase 3.** Dos
+R$ 33.441 de receita, **R$ 33.206 — 99,3% — estão em `NEEDS_REVIEW`**. Não é
+defeito: são os `Pix recebido`, e a regra 3c do `SYSTEM_PROMPT` manda o modelo
+baixar a confiança quando a descrição não diz quem é o remetente. O sistema está
+perguntando exatamente onde deveria.
+
+A consequência de produto é que **o total sem contexto seria uma mentira
+confortável**. Daí `needs_review_total` viajar dentro de cada bloco de `kind`, e o
+cartão dizer "99% aguardando sua confirmação". O plano original previa um aviso
+baseado em `PENDING + FAILED`, que são **zero** — ele nunca teria disparado. O eixo
+certo é `NEEDS_REVIEW`, e por valor, não por contagem: em número de lançamentos a
+receita é 32 de 45, o que soaria bem menos grave do que é.
+
+🔬 **A questão do índice está fechada, e a resposta é "nenhum".** Medido contra as
+333 transações reais:
+
+```
+HashAggregate  (cost=126.33..126.36 rows=3) (actual time=0.472..0.474 rows=3)
+  ->  Seq Scan on transactions  (actual time=0.011..0.378 rows=333)
+Planning Time: 3.281 ms
+Execution Time: 0.667 ms
+```
+
+O planejamento custa **cinco vezes** mais que a execução, e o `by_category` dá o
+mesmo (0,679 ms). Com um filtro de período que pega a tabela quase inteira, o
+planner não usaria um índice nem se ele existisse. Índice custa escrita em todo
+sync; este não pagaria nada.
+
+Critério para revisitar, registrado em vez de esquecido: `transactions` acima de
+~50 mil linhas, **ou** `Execution Time` da agregação acima de 50 ms.
+
+🛠️ **O dashboard é a home**, e o painel de diagnóstico da Fase 0 foi para
+`/diagnostico`. Ele continua útil — é onde se vê se o Ollama caiu —, mas uma home
+que se declarava provisória enquanto existia um dashboard era um item a mais no
+menu sem razão.
 
 ### Onde o sync é disparado
 
@@ -427,6 +462,8 @@ autenticação real.
 | **`Pix enviado` continua `TRANSFER`** | espelho não resolvido: pagar alguém por serviço é despesa. A regra 3b manda preferir a categoria do que foi pago, mas o resto fica fora dos gastos |
 | **O laço de aprendizado não existe** | o LLM não vê as correções `MANUAL`; realimentar é a pipeline híbrida. A tela já existe, e `categorization_reviews` é o insumo — falta a camada que lê dali |
 | **Limiar `LOW_CONFIDENCE = 0.70` continua sem calibração** | ele *dispara* (70 dos 137 `NEEDS_REVIEW`), e agora **há como medir**: `categorization_reviews` guarda `previous_confidence` ao lado da resposta. Falta volume de correções |
-| **O dashboard não existe** | é o que resta da Fase 4. A questão do índice com `kind` segue em aberto, e só se decide com `EXPLAIN ANALYZE` da query real |
+| ~~O dashboard não existe~~ | ✅ implementado; `TRANSFER` fora dos totais e a fatia sob revisão exposta por `kind` |
+| ~~Índice com `kind` vale a pena?~~ | ✅ medido: Seq Scan, 0,67 ms contra 3,3 ms de planejamento. Nenhum índice novo; revisitar acima de ~50 mil linhas |
+| **99,3% da receita nasce em `NEEDS_REVIEW`** | é o desenho funcionando (regra 3c), mas significa que o total de receita depende quase inteiramente da fila ser respondida |
 | Descrição corrigida na origem não invalida a categoria já gravada | escape é `POST /categorization/reset`, não invalidação automática |
 | O lock de categorização é por processo, como o do sync | ambos deixam de valer com `uvicorn --workers > 1` |

@@ -4,10 +4,9 @@ SaaS de finanças pessoais: agregação via Open Finance (Pluggy), categorizaç�
 LLM self-hosted (Ollama), multi-tenancy com RLS e conformidade com a LGPD.
 Uso pessoal, um único tenant ativo, schema já preparado para vários.
 
-**Estado:** Fases 0 a 3 concluídas (infra, schema, integração Pluggy,
-categorização por LLM). Fase 4 em andamento: a **tela de revisão está de pé**, o
-**dashboard não**. O roadmap completo e o racional das decisões estão no
-[README](README.md).
+**Estado:** Fases 0 a 4 concluídas (infra, schema, integração Pluggy, categorização
+por LLM, revisão e dashboard). Fase 5 (LGPD) é a próxima. O roadmap completo e o
+racional das decisões estão no [README](README.md).
 
 Idioma: código e schema em inglês; comentários, docs e conteúdo de usuário em
 pt-BR. Commits em pt-BR.
@@ -293,10 +292,9 @@ em `pluggy/runner.py`, porque aquele pacote não deve conhecer a Fase 3.
   A regra 4 do `SYSTEM_PROMPT` é o que separa as duas — mexer nela sem conferir
   "Valor recebido de Investimentos" transforma receita em transferência.
 
-## Fase 4 — como a revisão funciona
+## Fase 4 — como a revisão e o dashboard funcionam
 
-Etapa A concluída (fila de revisão e correção manual); o **dashboard ainda não
-existe**.
+Concluída: fila de revisão, correção manual e dashboard.
 
 `PATCH /transactions/{id}` (`app/api/v1/transactions.py`) é o único caminho que
 grava `category_source = 'MANUAL'`. Ele faz duas escritas na mesma transação, e a
@@ -336,11 +334,46 @@ O que é fácil de quebrar sem saber:
   com confiança 0,95 e concordância com a Pluggy nunca entra em `NEEDS_REVIEW`, e
   sem esse caminho ficaria sem conserto.
 
+### O dashboard
+
+`GET /dashboard/summary` (`app/api/v1/dashboard.py`) só consulta e monta; a
+aritmética vive em `app/services/dashboard.py`, que não conhece o banco — mesma
+fronteira de `catalog.build_catalog` × `catalog.load_catalog`, e pelo mesmo motivo:
+a soma é o que precisa de teste, e testá-la não deveria exigir Postgres.
+
+O que é fácil de quebrar sem saber:
+
+- **`TRANSFER` fora de `income`, `expense` e `net`.** É a razão de o campo `kind`
+  existir. Se vazar, o total continua parecendo plausível — só está errado, e
+  ninguém percebe: aplicar R$ 5.000 num CDB vira R$ 5.000 de gasto, e o resgate
+  dos mesmos R$ 5.000 vira receita meses depois.
+- **`needs_review_total` viaja junto de cada `kind`, e não é opcional.** É o que
+  permite ao cartão dizer quanto do número é palpite. 🔬 Hoje **99,3% da receita**
+  (R$ 33.206 de R$ 33.441) está em `NEEDS_REVIEW`, porque a regra 3c do
+  `SYSTEM_PROMPT` manda o modelo perguntar em vez de cravar em `Pix recebido`. Um
+  total sem essa companhia seria um número errado com cara de certo.
+- **O rótulo da categoria diz "aguardando confirmação", nunca "confirmado".**
+  `CATEGORIZED` por LLM significa "o modelo não perguntou", que não é a mesma coisa
+  que o titular ter respondido. A segunda coisa só se lê de `categorization_reviews`.
+- **A contagem da fila é do período filtrado**, como todo o resto da resposta. A
+  faixa de aviso diz "deste período" por isso — senão discordaria dos números logo
+  abaixo dela.
+- **Rótulo sai de `load_catalog`**, resolvido em Python pelo `category_id`. É a
+  terceira leitura do mesmo catálogo (`enum` do Ollama, `GET /categories`,
+  dashboard); um join com CTE recursiva daria o mesmo nome hoje e divergiria no dia
+  em que a regra de rótulo mudasse num lugar só.
+- 🔬 **Nenhum índice novo, e isso foi medido.** A agregação faz Seq Scan em 333
+  linhas: 0,67 ms de execução contra 3,3 ms de planejamento. Índice com `kind`
+  custaria escrita em todo sync sem ter o que melhorar. Revisitar acima de ~50 mil
+  linhas ou se a execução passar de 50 ms.
+
 Frontend em `frontend/src/`: `lib/api.ts` (cliente e tipos),
 `components/category-picker.tsx` (o controle que grava), `components/nav.tsx`,
-`app/revisao/page.tsx`. O alias `@/*` aponta para `src/`.
+`app/page.tsx` (dashboard), `app/revisao/page.tsx`, `app/diagnostico/page.tsx`.
+O alias `@/*` aponta para `src/`. Gráficos são barras em CSS — nenhuma dependência
+além de `next`, `react` e `react-dom`.
 
-## Fases 4 (dashboard) e 5
+## Fase 5
 
 Contexto acumulado em [`docs/fases-3-5.md`](docs/fases-3-5.md): o que já está
 decidido e o que segue em aberto no frontend e na LGPD. **Nada disso está

@@ -3,9 +3,9 @@
 SaaS de finanças pessoais com agregação via Open Finance (Pluggy), categorização
 automática por LLM self-hosted (Ollama) e conformidade com a LGPD desde o schema.
 
-**Estado atual: Fases 0 a 3 concluídas** — infraestrutura, modelagem, integração
-com a Pluggy e categorização por LLM. A Fase 4 está em andamento: a fila de revisão
-já responde às perguntas do modelo; o dashboard ainda não existe.
+**Estado atual: Fases 0 a 4 concluídas** — infraestrutura, modelagem, integração
+com a Pluggy, categorização por LLM, fila de revisão e dashboard. Falta a Fase 5
+(LGPD).
 
 ## Stack
 
@@ -45,7 +45,8 @@ Aplique as migrations:
 docker compose exec backend alembic upgrade head
 ```
 
-- Frontend: <http://localhost:3000> — painel de diagnóstico das três conexões
+- Frontend: <http://localhost:3000> — dashboard. As demais telas são
+  `/transacoes`, `/revisao`, `/conexoes` e `/diagnostico` (a saúde das três pontas)
 - API: <http://localhost:8000/docs>
 
 Testes:
@@ -146,10 +147,9 @@ legacy/      Protótipo SQLite original, apenas como referência
       avaliação da categorização nativa
 - [x] **Fase 3** — Categorização via Ollama (`qwen3.5:9b`), com saída restrita por
       JSON Schema e fila de revisão
-- [ ] **Fase 4** — Dashboard, filtros e tela de revisão de categorias
-  - [x] tela de revisão e correção manual (`PATCH /transactions/{id}`,
-        `categorization_reviews`)
-  - [ ] dashboard e filtros por período/categoria/conta
+- [x] **Fase 4** — Tela de revisão (`PATCH /transactions/{id}`,
+      `categorization_reviews`) e dashboard com filtros por período, categoria e
+      conta
 - [ ] **Fase 5** — LGPD: criptografia em repouso, retenção e registro de consentimento
 
 O contexto já levantado para as Fases 4 e 5 — decisões tomadas, questões em

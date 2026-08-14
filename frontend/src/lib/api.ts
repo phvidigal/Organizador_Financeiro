@@ -137,6 +137,48 @@ export type CategorizationStatusRead = {
   queue: QueueCounts;
 };
 
+// --- Dashboard -------------------------------------------------------------
+//
+// `needs_review_*` viaja junto do total de propósito: sem ele, a tela não teria
+// como dizer quanto do número é palpite do LLM aguardando resposta — e no estado
+// atual isso não é detalhe, é 99% da receita.
+
+export type KindTotal = {
+  total: Money;
+  count: number;
+  needs_review_total: Money;
+  needs_review_count: number;
+};
+
+export type CategoryTotal = {
+  category_id: string | null;
+  label: string;
+  kind: Kind;
+  total: Money;
+  count: number;
+  needs_review_count: number;
+};
+
+export type MonthTotal = {
+  month: string; // YYYY-MM
+  income: Money;
+  expense: Money;
+  transfer: Money;
+};
+
+export type DashboardSummary = {
+  date_from: string;
+  date_to: string;
+  income: KindTotal;
+  expense: KindTotal;
+  transfer: KindTotal;
+  // `income + expense`. TRANSFER fica de fora — é a razão de o campo `kind` existir.
+  net: Money;
+  by_category: CategoryTotal[];
+  by_month: MonthTotal[];
+  queue: QueueCounts;
+};
+
 export type Page<T> = {
   items: T[];
   total: number;
@@ -186,6 +228,13 @@ export const KIND_LABEL: Record<Kind, string> = {
   EXPENSE: "saída",
   TRANSFER: "transferência",
 };
+
+/** Percentual inteiro de `parte` sobre `todo`, ambos em módulo. 0 quando não há todo. */
+export function share(parte: Money, todo: Money): number {
+  const total = Math.abs(Number(todo));
+  if (total === 0) return 0;
+  return Math.round((Math.abs(Number(parte)) / total) * 100);
+}
 
 export function formatDate(value: string | null): string {
   if (!value) return "—";
