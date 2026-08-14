@@ -260,3 +260,45 @@ button:disabled {
 .amount-positive {
   color: var(--ok);
 }
+
+/* --- Fase 4: correção de categoria ----------------------------------------
+   Continua sem Tailwind e sem biblioteca de UI: a tela de revisão é uma tabela
+   com dois selects por linha, e nada disso justifica uma dependência no bundle.
+   As variáveis do topo seguem dando modo escuro de graça. */
+
+select {
+  padding: 0.35rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.85rem;
+  max-width: 16rem;
+}
+
+select:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+select:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.picker button {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+/* O seletor é a coluna mais larga da tabela; sem isto ela espreme a descrição. */
+.picker select[aria-label="Categoria"] {
+  min-width: 12rem;
+}

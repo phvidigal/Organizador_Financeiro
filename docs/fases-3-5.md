@@ -248,7 +248,7 @@ transferência. Todas contavam como gasto.
 
 ---
 
-## Fase 4 — Frontend · ⚠️ não implementada
+## Fase 4 — Frontend · 🛠️ tela de revisão implementada, dashboard não
 
 ### Três telas
 
@@ -260,6 +260,67 @@ produz `category_source = 'MANUAL'`, que é simultaneamente a correção do usu�
 a base de regras da pipeline híbrida e a única régua para medir o acerto do LLM.
 Atrito nessa tela custa o dado que as Fases 3 e 5 dependem. Ela também precisa
 permitir ajustar o `kind`, não só a categoria.
+
+🛠️ **Construída primeiro, e por essa razão.** `/revisao` lista a fila de
+`NEEDS_REVIEW`; `PATCH /transactions/{id}` grava. O `kind` é editável ao lado da
+categoria, com o valor de `categories.kind` como default.
+
+🛠️ **O widget Pluggy Connect ficou de fora**, e o cadastro segue colando o
+`itemId`. Exigiria um endpoint de connect token e o script da Pluggy no bundle,
+para um único titular cuja conexão já existe.
+
+🛠️ **A correção também acontece em `/transacoes`, e isso o plano não previa.** A
+fila só contém o que `decide.decide` marcou; um erro do LLM com confiança 0,95 e
+concordância com a Pluggy passa direto e **nunca** é perguntado. Sem um caminho de
+correção no extrato, esse erro ficaria sem conserto — e ele é justamente o caso que
+mais interessa medir, porque é onde a confiança alta mente.
+
+### 🛠️ A correção destrói o dado que ela produz — e isso precisou de tabela nova
+
+O plano tratava a gravação de `MANUAL` como um `UPDATE` e parou aí. Só que o UPDATE
+sobrescreve `category_id` e `category_confidence`: **depois dele não dá para saber
+se o titular confirmou a escolha do LLM ou a corrigiu**, que é exatamente a
+distinção de que a calibração depende. A régua se apagaria ao ser usada.
+
+Daí `categorization_reviews` (migration `0005`): uma linha append-only por
+correção, com a categoria, o `kind`, a origem, o status e a confiança **anteriores**
+ao lado da resposta do titular. A medição vira uma consulta:
+
+```sql
+SELECT previous_confidence, previous_category_id = new_category_id AS acertou
+FROM categorization_reviews;
+```
+
+Três decisões que andam junto com ela:
+
+- **`transactions.category_confidence` é zerada na correção.** O número cru passa a
+  morar na linha de revisão; mantê-lo faria a coluna significar "quão certo o LLM
+  estava" em linha MANUAL e "quão certo ele está" nas demais. A leitura da
+  calibração é `categorization_reviews`, e só ela.
+- **Sem `UPDATE` no GRANT** do `app_user`. Append-only por privilégio, não por
+  convenção. `DELETE` fica porque a eliminação do titular é `DELETE FROM tenants`
+  em cascata.
+- **Confirmar grava tanto quanto corrigir.** Registrar só a discordância daria uma
+  taxa de erro com numerador sem denominador.
+
+### 🛠️ `GET /categories` reusa o catálogo do LLM
+
+O seletor da tela sai de `load_catalog` — o mesmo carregamento que monta o `enum` do
+JSON Schema enviado ao Ollama. Não é economia de código: é o que garante que o
+humano escolha da mesma lista que o modelo pôde escolher. Duas listas montadas por
+caminhos diferentes divergiriam na primeira categoria criada, e a correção deixaria
+de ser comparável com a decisão que ela corrige.
+
+### ⚠️ A regra de revisão não é recomputada no cliente
+
+A tela mostra a confiança e o palpite da Pluggy como **fatos crus**, lado a lado, e
+não o motivo calculado. Reimplementar `decide.decide` no frontend criaria uma
+segunda cópia da regra que diverge da primeira sem produzir erro nenhum — e os dois
+números já dizem a quem responde o que ele precisa saber.
+
+O custo é real e vale anotar: quando a regra mudar, a tela não muda junto, e alguém
+pode ler "confiança 0,95" numa linha que veio para cá por discordância e achar que a
+fila está errada.
 
 ### O dashboard soma por `kind` e agrupa por categoria
 
@@ -364,7 +425,8 @@ autenticação real.
 | **"Pension"/"Retirement" e "Automatic investment" ficaram sem de/para** | duas categorias da Pluggy disputando uma nossa; `pluggy_category_id` é coluna única |
 | ~~`Pix recebido` é `TRANSFER` e engole receita~~ | ✅ migration `0004`: movido para `Receitas` (`INCOME`); a receita reconhecida foi de <1% para ~100% do que entrou |
 | **`Pix enviado` continua `TRANSFER`** | espelho não resolvido: pagar alguém por serviço é despesa. A regra 3b manda preferir a categoria do que foi pago, mas o resto fica fora dos gastos |
-| **O laço de aprendizado não existe** | o LLM não vê as correções `MANUAL`; realimentar é a pipeline híbrida, e depende da tela da Fase 4 para haver o que aprender |
-| **Limiar `LOW_CONFIDENCE = 0.70` continua sem calibração** | ele *dispara* (45 dos 96 `NEEDS_REVIEW`), mas se `0.450` erra mais que `0.950` só as correções `MANUAL` dirão |
+| **O laço de aprendizado não existe** | o LLM não vê as correções `MANUAL`; realimentar é a pipeline híbrida. A tela já existe, e `categorization_reviews` é o insumo — falta a camada que lê dali |
+| **Limiar `LOW_CONFIDENCE = 0.70` continua sem calibração** | ele *dispara* (70 dos 137 `NEEDS_REVIEW`), e agora **há como medir**: `categorization_reviews` guarda `previous_confidence` ao lado da resposta. Falta volume de correções |
+| **O dashboard não existe** | é o que resta da Fase 4. A questão do índice com `kind` segue em aberto, e só se decide com `EXPLAIN ANALYZE` da query real |
 | Descrição corrigida na origem não invalida a categoria já gravada | escape é `POST /categorization/reset`, não invalidação automática |
 | O lock de categorização é por processo, como o do sync | ambos deixam de valer com `uvicorn --workers > 1` |

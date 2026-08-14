@@ -9,7 +9,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
-import { BROWSER_API, type SyncStatus } from "../lib/api";
+import { BROWSER_API, type SyncStatus } from "@/lib/api";
 
 const POLL_MS = 3000;
 

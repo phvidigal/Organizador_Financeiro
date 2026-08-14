@@ -1,11 +1,12 @@
-"""Schema de transação."""
+"""Schemas de transação."""
 
 import uuid
 from datetime import date as date_type
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.enums import TransactionKind
 from app.schemas.common import Money
 
 
@@ -43,3 +44,23 @@ class TransactionRead(BaseModel):
     # `raw_payload` e `merchant` ficam de fora: o primeiro é insumo de
     # reprocessamento, não de tela, e ambos carregam dado da instituição que não
     # precisa atravessar a rede a cada listagem.
+
+
+class TransactionCategorizeRequest(BaseModel):
+    """Correção manual de categoria, vinda da tela de revisão ou do extrato."""
+
+    category_id: uuid.UUID = Field(
+        description="id de uma categoria ativa do titular (ver GET /categories)"
+    )
+
+    # Opcional, e herda de `categories.kind` quando ausente — que é o comportamento
+    # correto na esmagadora maioria dos casos (invariante 4).
+    #
+    # O override precisa existir porque a categoria não decide tudo: um Pix enviado
+    # para pagar um serviço é despesa mesmo apontando para uma categoria TRANSFER, e
+    # a origem do dado nunca sabe se o destino era conta do próprio titular. Só o
+    # titular sabe, e esta é a tela em que ele responde.
+    kind: TransactionKind | None = Field(
+        default=None,
+        description="sobrepõe o kind herdado da categoria; ausente = herda",
+    )
