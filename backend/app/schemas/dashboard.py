@@ -79,7 +79,22 @@ class DashboardSummary(BaseModel):
     transfer: KindTotal
 
     # `income + expense`, com `transfer` deliberadamente fora.
+    #
+    # **Não é saldo**, e a distinção não é vocabulário: é fluxo do período, somado
+    # entre as contas. O dinheiro que saiu como TRANSFER — aplicação, pagamento de
+    # fatura, Pix — saiu da conta de verdade e não está aqui; e as compras no cartão
+    # entram na data da compra, enquanto o dinheiro só sai na fatura. A tela chama
+    # isto de "resultado do período" por isso.
     net: Money
+
+    # O que existe nas contas **agora**, vindo de `accounts.balance` (a Pluggy
+    # reporta). Ignora o filtro de período de propósito — é uma fotografia, não um
+    # fluxo —, mas respeita o filtro de conta.
+    #
+    # Só contas `BANK`: o "saldo" de um cartão é dívida, e somá-lo a dinheiro em
+    # conta produziria um número que não significa nada. `None` quando nenhuma conta
+    # bancária entra no filtro.
+    current_balance: Money | None
 
     by_category: list[CategoryTotal]
     by_month: list[MonthTotal]

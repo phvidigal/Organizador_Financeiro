@@ -28,6 +28,16 @@ export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 100;
 
+// A categoria que some do extrato por padrão. Dinheiro andando entre contas do
+// próprio titular é ruído na leitura do dia a dia — mas continua alcançável por um
+// clique, porque esta tela também existe para conferir o que o sync gravou, e
+// esconder linha sem saída quebraria esse propósito.
+//
+// Casado por rótulo, e não por id fixo: os ids são determinísticos mas por tenant.
+// Se o titular renomear a categoria, o filtro simplesmente deixa de se aplicar e
+// tudo aparece — falha para o lado seguro.
+const CONTAS_PROPRIAS = "Transferências > Transferência entre contas próprias";
+
 const SOURCE_LABEL: Record<string, string> = {
   PLUGGY: "Pluggy",
   RULE: "regra",
@@ -39,12 +49,25 @@ const SOURCE_LABEL: Record<string, string> = {
 export default async function TransacoesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ offset?: string; account_id?: string; category_id?: string }>;
+  searchParams: Promise<{
+    offset?: string;
+    account_id?: string;
+    category_id?: string;
+    proprias?: string;
+  }>;
 }) {
   const params = await searchParams;
   const offset = Math.max(0, Number(params.offset ?? 0) || 0);
   const accountId = params.account_id;
   const categoryId = params.category_id;
+  const mostrarProprias = params.proprias === "1";
+
+  // O catálogo primeiro: é dele que sai o id da categoria a esconder, e sem ele a
+  // listagem não teria como montar o filtro.
+  const categories = await serverFetch<Category[]>("/categories");
+  const contasProprias = categories.ok
+    ? categories.data.find((c) => c.label === CONTAS_PROPRIAS)
+    : undefined;
 
   const query = new URLSearchParams({
     limit: String(PAGE_SIZE),
@@ -52,11 +75,15 @@ export default async function TransacoesPage({
   });
   if (accountId) query.set("account_id", accountId);
   if (categoryId) query.set("category_id", categoryId);
+  // Filtrar no backend e não depois de receber a página: escondendo aqui, o `total`
+  // e a paginação passariam a mentir — cem linhas pedidas, oitenta exibidas.
+  if (!mostrarProprias && contasProprias) {
+    query.set("exclude_category_id", contasProprias.id);
+  }
 
-  const [page, accounts, categories] = await Promise.all([
+  const [page, accounts] = await Promise.all([
     serverFetch<Page<Transaction>>(`/transactions?${query}`),
     serverFetch<Account[]>("/accounts"),
-    serverFetch<Category[]>("/categories"),
   ]);
 
   if (!page.ok) {
@@ -85,22 +112,37 @@ export default async function TransacoesPage({
         {total} lançamentos sincronizados · exibindo {total === 0 ? 0 : offset + 1}–{fim}
       </p>
 
-      {accounts.ok && accounts.data.length > 0 && (
-        <p className="row">
-          <Link className="chip" href="/transacoes">
-            todas
-          </Link>
-          {accounts.data.map((conta) => (
+      <p className="row">
+        {accounts.ok &&
+          accounts.data.length > 0 && [
             <Link
-              className="chip"
-              key={conta.id}
-              href={`/transacoes?account_id=${conta.id}`}
+              className={"chip" + (!accountId ? " chip-ativo" : "")}
+              href={pageHref(0, undefined, categoryId, mostrarProprias)}
+              key="todas"
             >
-              {conta.type === "CREDIT" ? "cartão" : "conta"} · {conta.name.slice(0, 22)}
-            </Link>
-          ))}
-        </p>
-      )}
+              todas
+            </Link>,
+            ...accounts.data.map((conta) => (
+              <Link
+                className={"chip" + (accountId === conta.id ? " chip-ativo" : "")}
+                key={conta.id}
+                href={pageHref(0, conta.id, categoryId, mostrarProprias)}
+              >
+                {conta.type === "CREDIT" ? "cartão" : "conta"} · {conta.name.slice(0, 22)}
+              </Link>
+            )),
+          ]}
+        {contasProprias && (
+          <Link
+            className={"chip" + (mostrarProprias ? " chip-ativo" : "")}
+            href={pageHref(0, accountId, categoryId, !mostrarProprias)}
+          >
+            {mostrarProprias
+              ? "ocultar transferências entre contas próprias"
+              : "mostrar transferências entre contas próprias"}
+          </Link>
+        )}
+      </p>
 
       {items.length === 0 ? (
         <p className="hint">
@@ -171,13 +213,21 @@ export default async function TransacoesPage({
         {offset > 0 && (
           <Link
             className="chip"
-            href={pageHref(Math.max(0, offset - PAGE_SIZE), accountId, categoryId)}
+            href={pageHref(
+              Math.max(0, offset - PAGE_SIZE),
+              accountId,
+              categoryId,
+              mostrarProprias,
+            )}
           >
             ← anteriores
           </Link>
         )}
         {fim < total && (
-          <Link className="chip" href={pageHref(offset + PAGE_SIZE, accountId, categoryId)}>
+          <Link
+            className="chip"
+            href={pageHref(offset + PAGE_SIZE, accountId, categoryId, mostrarProprias)}
+          >
             próximas →
           </Link>
         )}
@@ -191,9 +241,15 @@ export default async function TransacoesPage({
   );
 }
 
-function pageHref(offset: number, accountId?: string, categoryId?: string) {
+function pageHref(
+  offset: number,
+  accountId?: string,
+  categoryId?: string,
+  mostrarProprias?: boolean,
+) {
   const q = new URLSearchParams({ offset: String(offset) });
   if (accountId) q.set("account_id", accountId);
   if (categoryId) q.set("category_id", categoryId);
+  if (mostrarProprias) q.set("proprias", "1");
   return `/transacoes?${q}`;
 }

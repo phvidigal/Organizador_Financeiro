@@ -302,6 +302,43 @@ async def test_filtro_de_conta_recorta(api, movimento, account_b) -> None:
     assert corrente["income"]["total"] == "0.00"
 
 
+async def test_saldo_atual_vem_das_contas_e_ignora_o_periodo(
+    api, admin_session, movimento, account_a
+) -> None:
+    """`net` é fluxo do período; `current_balance` é fotografia.
+
+    Confundir os dois foi o defeito real desta tela: o titular comparou o "saldo"
+    do dashboard com o do aplicativo do banco e viu números que não conversavam —
+    porque um deles não era saldo.
+    """
+    await admin_session.execute(
+        text("UPDATE accounts SET balance = 152.32 WHERE id = :id"), {"id": str(account_a)}
+    )
+    await admin_session.commit()
+
+    body = await get_summary(api)
+    assert body["current_balance"] == "152.32"
+    # Um recorte de período diferente não move a fotografia.
+    recortado = await get_summary(api, date_from="2026-07-01")
+    assert recortado["current_balance"] == "152.32"
+    # …mas move o fluxo.
+    assert recortado["net"] != body["net"]
+
+
+async def test_saldo_de_cartao_nao_entra_no_dinheiro_em_conta(
+    api, admin_session, movimento, account_b
+) -> None:
+    """"Saldo" de cartão é dívida. Somá-lo a dinheiro em conta daria um número que
+    não significa nada, então o filtro por cartão devolve `null`."""
+    await admin_session.execute(
+        text("UPDATE accounts SET balance = 999.00 WHERE id = :id"), {"id": str(account_b)}
+    )
+    await admin_session.commit()
+
+    body = await get_summary(api, account_id=str(account_b))
+    assert body["current_balance"] is None
+
+
 async def test_linha_excluida_fica_fora_de_tudo(api, movimento) -> None:
     """`deleted_at` significa "sumiu na origem". R$ 9.999 de despesa fantasma
     apareceriam de imediato se o filtro faltasse."""

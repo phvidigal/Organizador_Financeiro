@@ -325,6 +325,51 @@ async def test_transacao_inexistente_e_404(api, categories) -> None:
     assert response.status_code == 404
 
 
+async def test_exclude_category_id_nao_leva_junto_as_sem_categoria(
+    api, app_tenant_session, categories, transaction_id
+) -> None:
+    """O extrato esconde "Transferência entre contas próprias" por padrão, e o
+    filtro precisa tirar **só** ela.
+
+    Com `category_id != x`, toda linha de `category_id` NULL sairia junto — `NULL
+    != x` é NULL, não verdadeiro. O que sumiria seria justamente o que ainda não foi
+    categorizado, que é o que mais precisa ser visto.
+    """
+    # Uma segunda linha, que fica sem categoria nenhuma.
+    async with app_tenant_session(TENANT_A) as session:
+        await session.execute(
+            text(
+                "INSERT INTO transactions "
+                "(tenant_id, account_id, source, external_id, amount, kind, date, "
+                " description_raw, categorization_status) "
+                "SELECT tenant_id, account_id, source, 'sem-categoria', -10.00, 'EXPENSE', "
+                "       date, 'SEM CATEGORIA', 'PENDING' "
+                "FROM transactions WHERE id = :id"
+            ),
+            {"id": str(transaction_id)},
+        )
+
+    async with api() as client:
+        await client.patch(
+            f"/transactions/{transaction_id}",
+            json={"category_id": str(categories["pix_enviado"])},
+        )
+        response = await client.get(
+            "/transactions",
+            params={"exclude_category_id": str(categories["pix_enviado"])},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # A categorizada saiu…
+    assert str(transaction_id) not in {item["id"] for item in body["items"]}
+    # …e a de categoria NULL ficou, que é o ponto do `IS DISTINCT FROM`.
+    assert [item["description_raw"] for item in body["items"]] == ["SEM CATEGORIA"]
+    # O `total` acompanha o filtro, senão a paginação passa a mentir.
+    assert body["total"] == 1
+
+
 async def test_reset_continua_recusando_manual(api, categories, transaction_id) -> None:
     """A contrapartida da tela: nada no sistema pode apagar a resposta do titular."""
     async with api() as client:

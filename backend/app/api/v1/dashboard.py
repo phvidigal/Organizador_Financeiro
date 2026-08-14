@@ -20,7 +20,8 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenancy import get_tenant_session
-from app.models.enums import CategorizationStatus, TransactionKind
+from app.models.account import Account
+from app.models.enums import AccountType, CategorizationStatus, TransactionKind
 from app.models.transaction import Transaction
 from app.schemas.categorization import QueueCountsRead
 from app.schemas.dashboard import DashboardSummary
@@ -107,6 +108,20 @@ async def summary(
         )
     ).all()
 
+    # (4) saldo atual. **Fora do recorte de período**, de propósito: é uma
+    # fotografia do que a Pluggy reporta hoje, não um fluxo. Só contas `BANK` —
+    # o "saldo" de um cartão é dívida, e somá-lo a dinheiro em conta daria um
+    # número sem significado.
+    balance_filters = [
+        Account.deleted_at.is_(None),
+        Account.type == AccountType.BANK.value,
+    ]
+    if account_id is not None:
+        balance_filters.append(Account.id == account_id)
+    current_balance = await session.scalar(
+        select(func.sum(Account.balance)).where(*balance_filters)
+    )
+
     catalog = await load_catalog(session)
 
     income = agg.kind_total(by_kind_status, TransactionKind.INCOME)
@@ -121,8 +136,10 @@ async def summary(
         expense=expense,
         transfer=transfer,
         # `transfer` fora da conta, e é o ponto inteiro do campo `kind`. Despesa já
-        # é negativa, então o saldo é uma soma e não uma subtração.
+        # é negativa, então é uma soma e não uma subtração. **Isto não é saldo** —
+        # ver o comentário do campo em `app/schemas/dashboard.py`.
         net=income.total + expense.total,
+        current_balance=current_balance,
         by_category=agg.by_category(by_category_rows, catalog),
         by_month=agg.by_month(by_month_rows),
         queue=QueueCountsRead(

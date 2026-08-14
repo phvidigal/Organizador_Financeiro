@@ -138,13 +138,36 @@ export default async function DashboardPage({
       <div className="cards">
         <Cartao titulo="Receita" bloco={d.income} tom="positivo" />
         <Cartao titulo="Despesa" bloco={d.expense} tom="negativo" />
+        {/* "Resultado do período", e nunca "Saldo". Num app de finanças "saldo" é
+            o que está na conta, e este número é fluxo: não conta o que saiu como
+            transferência, e conta a compra do cartão na data da compra em vez da
+            data da fatura. Chamá-lo de saldo faz o titular comparar com o
+            aplicativo do banco e concluir, com razão, que o número está errado. */}
         <div className="card">
-          <h2>Saldo</h2>
+          <h2>Resultado do período</h2>
           <p className={"valor " + (Number(d.net) < 0 ? "amount-negative" : "amount-positive")}>
             {formatMoney(d.net)}
           </p>
-          <p className="hint">receita menos despesa, sem as transferências</p>
+          <p className="hint">
+            receita menos despesa, sem as transferências — não é o saldo da conta
+          </p>
         </div>
+        {d.current_balance !== null && (
+          <div className="card">
+            <h2>Em conta hoje</h2>
+            <p
+              className={
+                "valor " +
+                (Number(d.current_balance) < 0 ? "amount-negative" : "amount-positive")
+              }
+            >
+              {formatMoney(d.current_balance)}
+            </p>
+            <p className="hint">
+              saldo reportado pelo banco, fora do recorte de período
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="card">

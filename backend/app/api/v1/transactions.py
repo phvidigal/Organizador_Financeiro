@@ -25,6 +25,14 @@ MAX_LIMIT = 200
 async def list_transactions(
     account_id: uuid.UUID | None = Query(None),
     category_id: uuid.UUID | None = Query(None),
+    # Existe para o extrato poder esconder "Transferência entre contas próprias" —
+    # dinheiro andando entre contas do titular é ruído na leitura do dia a dia.
+    #
+    # Exclusão por id e não por natureza: `kind = TRANSFER` também pega pagamento de
+    # fatura e aplicação em investimento, que são movimentos que o titular quer ver.
+    exclude_category_id: uuid.UUID | None = Query(
+        None, description="omite uma categoria da listagem"
+    ),
     date_from: date_type | None = Query(None),
     date_to: date_type | None = Query(None),
     # Enums e não `str`: com `str`, um valor inválido devolvia lista vazia em
@@ -49,6 +57,11 @@ async def list_transactions(
         filters.append(Transaction.account_id == account_id)
     if category_id is not None:
         filters.append(Transaction.category_id == category_id)
+    if exclude_category_id is not None:
+        # `IS DISTINCT FROM` e não `!=`: com `!=`, toda linha de `category_id` NULL
+        # sairia da listagem junto, porque `NULL != x` é NULL e não verdadeiro — e o
+        # que sumiria seria justamente o que ainda não foi categorizado.
+        filters.append(Transaction.category_id.is_distinct_from(exclude_category_id))
     if date_from is not None:
         filters.append(Transaction.date >= date_from)
     if date_to is not None:

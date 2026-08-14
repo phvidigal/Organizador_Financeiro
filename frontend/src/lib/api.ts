@@ -173,7 +173,14 @@ export type DashboardSummary = {
   expense: KindTotal;
   transfer: KindTotal;
   // `income + expense`. TRANSFER fica de fora — é a razão de o campo `kind` existir.
+  //
+  // **Não é saldo.** É o resultado do período: o dinheiro que saiu como
+  // transferência (aplicação, fatura, Pix) saiu da conta de verdade e não está
+  // aqui, e a compra no cartão entra na data da compra, não na do pagamento.
   net: Money;
+  // O que existe nas contas bancárias agora, direto de `accounts.balance`. Ignora
+  // o período (é fotografia, não fluxo) e respeita o filtro de conta.
+  current_balance: Money | null;
   by_category: CategoryTotal[];
   by_month: MonthTotal[];
   queue: QueueCounts;
