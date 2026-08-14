@@ -3,8 +3,9 @@
 SaaS de finanças pessoais com agregação via Open Finance (Pluggy), categorização
 automática por LLM self-hosted (Ollama) e conformidade com a LGPD desde o schema.
 
-**Estado atual: Fases 0 e 1 concluídas** — infraestrutura e modelagem de dados.
-Nenhuma integração externa foi implementada ainda.
+**Estado atual: Fases 0 a 3 concluídas** — infraestrutura, modelagem, integração
+com a Pluggy e categorização por LLM. A Fase 4 está em andamento: a fila de revisão
+já responde às perguntas do modelo; o dashboard ainda não existe.
 
 ## Stack
 
@@ -146,6 +147,9 @@ legacy/      Protótipo SQLite original, apenas como referência
 - [x] **Fase 3** — Categorização via Ollama (`qwen3.5:9b`), com saída restrita por
       JSON Schema e fila de revisão
 - [ ] **Fase 4** — Dashboard, filtros e tela de revisão de categorias
+  - [x] tela de revisão e correção manual (`PATCH /transactions/{id}`,
+        `categorization_reviews`)
+  - [ ] dashboard e filtros por período/categoria/conta
 - [ ] **Fase 5** — LGPD: criptografia em repouso, retenção e registro de consentimento
 
 O contexto já levantado para as Fases 4 e 5 — decisões tomadas, questões em

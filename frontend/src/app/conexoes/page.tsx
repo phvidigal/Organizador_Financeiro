@@ -6,6 +6,7 @@
 
 import Link from "next/link";
 
+import { Nav } from "@/components/nav";
 import {
   type Account,
   type BankConnection,
@@ -13,7 +14,8 @@ import {
   formatMoney,
   serverFetch,
   type SyncStatus,
-} from "../lib/api";
+} from "@/lib/api";
+
 import { AdoptItemForm } from "./adopt-item-form";
 import { SyncButton } from "./sync-button";
 
@@ -156,15 +158,5 @@ export default async function ConexoesPage() {
         );
       })}
     </main>
-  );
-}
-
-function Nav() {
-  return (
-    <nav className="nav">
-      <Link href="/">Diagnóstico</Link>
-      <Link href="/conexoes">Conexões</Link>
-      <Link href="/transacoes">Transações</Link>
-    </nav>
   );
 }

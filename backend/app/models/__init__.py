@@ -8,6 +8,7 @@ migration correspondente nunca é gerada.
 from app.models.account import Account
 from app.models.bank_connection import BankConnection
 from app.models.base import Base
+from app.models.categorization_review import CategorizationReview
 from app.models.category import Category
 from app.models.category_rule import CategoryRule
 from app.models.enums import (
@@ -33,6 +34,7 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "categories",
     "transactions",
     "category_rules",
+    "categorization_reviews",
 )
 
 __all__ = [
@@ -41,6 +43,7 @@ __all__ = [
     "AccountType",
     "BankConnection",
     "Base",
+    "CategorizationReview",
     "CategorizationStatus",
     "Category",
     "CategoryRule",

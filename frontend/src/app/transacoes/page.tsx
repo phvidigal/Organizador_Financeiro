@@ -1,49 +1,62 @@
-// Extrato cru, para conferir o que o sync gravou.
+// Extrato completo, com correção de categoria por linha.
 //
-// Não é o dashboard — isso é a Fase 4. Aqui não há soma nem gráfico de propósito:
-// enquanto as transferências não forem categorizadas, elas contam como receita e
-// despesa (ver a invariante do `kind` no CLAUDE.md), e um total nesta tela seria
-// um número errado com cara de certo.
+// Não é o dashboard: aqui não há soma nem gráfico de propósito, porque enquanto
+// houver transação na fila do LLM as transferências ainda contam como receita e
+// despesa (ver a invariante do `kind` no CLAUDE.md), e um total nesta tela seria um
+// número errado com cara de certo.
+//
+// A edição por linha existe porque a fila de `/revisao` **não** pega tudo: um erro
+// do LLM com confiança 0,95 e concordância com a Pluggy passa direto e nunca é
+// perguntado. Sem um caminho de correção aqui, ele ficaria sem conserto.
 
 import Link from "next/link";
 
+import { CategoryPicker } from "@/components/category-picker";
+import { Nav } from "@/components/nav";
 import {
   type Account,
+  type Category,
   formatDate,
   formatMoney,
+  KIND_LABEL,
   type Page,
   serverFetch,
   type Transaction,
-} from "../lib/api";
+} from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 100;
 
-const KIND_LABEL: Record<string, string> = {
-  INCOME: "entrada",
-  EXPENSE: "saída",
-  TRANSFER: "transferência",
+const SOURCE_LABEL: Record<string, string> = {
+  PLUGGY: "Pluggy",
+  RULE: "regra",
+  EMBEDDING: "embedding",
+  LLM: "LLM",
+  MANUAL: "você",
 };
 
 export default async function TransacoesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ offset?: string; account_id?: string }>;
+  searchParams: Promise<{ offset?: string; account_id?: string; category_id?: string }>;
 }) {
   const params = await searchParams;
   const offset = Math.max(0, Number(params.offset ?? 0) || 0);
   const accountId = params.account_id;
+  const categoryId = params.category_id;
 
   const query = new URLSearchParams({
     limit: String(PAGE_SIZE),
     offset: String(offset),
   });
   if (accountId) query.set("account_id", accountId);
+  if (categoryId) query.set("category_id", categoryId);
 
-  const [page, accounts] = await Promise.all([
+  const [page, accounts, categories] = await Promise.all([
     serverFetch<Page<Transaction>>(`/transactions?${query}`),
     serverFetch<Account[]>("/accounts"),
+    serverFetch<Category[]>("/categories"),
   ]);
 
   if (!page.ok) {
@@ -59,6 +72,7 @@ export default async function TransacoesPage({
   const nomeDaConta = new Map(
     accounts.ok ? accounts.data.map((a) => [a.id, a.type === "CREDIT" ? "cartão" : "conta"]) : [],
   );
+  const porId = new Map(categories.ok ? categories.data.map((c) => [c.id, c]) : []);
 
   const { items, total } = page.data;
   const fim = Math.min(offset + PAGE_SIZE, total);
@@ -101,9 +115,10 @@ export default async function TransacoesPage({
                 <th>Data</th>
                 <th>Descrição</th>
                 <th>Origem</th>
-                <th>Categoria (Pluggy)</th>
+                <th>Categoria</th>
                 <th>Natureza</th>
                 <th className="num">Valor</th>
+                <th>Corrigir</th>
               </tr>
             </thead>
             <tbody>
@@ -116,8 +131,17 @@ export default async function TransacoesPage({
                     {t.posted_at === null && <span className="badge">pendente</span>}
                   </td>
                   <td className="muted">{nomeDaConta.get(t.account_id) ?? "—"}</td>
-                  <td className="muted">{t.pluggy_category_name ?? "—"}</td>
-                  <td className="muted">{KIND_LABEL[t.kind] ?? t.kind}</td>
+                  <td>
+                    {t.category_id
+                      ? (porId.get(t.category_id)?.label ?? "categoria inativa")
+                      : "—"}
+                    {t.category_source && (
+                      <span className="badge">
+                        {SOURCE_LABEL[t.category_source] ?? t.category_source}
+                      </span>
+                    )}
+                  </td>
+                  <td className="muted">{KIND_LABEL[t.kind]}</td>
                   <td
                     className={
                       "num " +
@@ -125,6 +149,16 @@ export default async function TransacoesPage({
                     }
                   >
                     {formatMoney(t.amount)}
+                  </td>
+                  <td>
+                    {categories.ok && (
+                      <CategoryPicker
+                        transactionId={t.id}
+                        categories={categories.data}
+                        currentCategoryId={t.category_id}
+                        currentKind={t.kind}
+                      />
+                    )}
                   </td>
                 </tr>
               ))}
@@ -137,38 +171,29 @@ export default async function TransacoesPage({
         {offset > 0 && (
           <Link
             className="chip"
-            href={pageHref(Math.max(0, offset - PAGE_SIZE), accountId)}
+            href={pageHref(Math.max(0, offset - PAGE_SIZE), accountId, categoryId)}
           >
             ← anteriores
           </Link>
         )}
         {fim < total && (
-          <Link className="chip" href={pageHref(offset + PAGE_SIZE, accountId)}>
+          <Link className="chip" href={pageHref(offset + PAGE_SIZE, accountId, categoryId)}>
             próximas →
           </Link>
         )}
       </div>
 
       <p className="hint">
-        Categoria é o palpite da Pluggy, guardado mas ainda não adotado — todos os
-        lançamentos seguem na fila da categorização por LLM (Fase 3).
+        Corrigir aqui grava a mesma resposta que a tela de{" "}
+        <Link href="/revisao">revisão</Link> — e nenhuma sincronização a sobrescreve.
       </p>
     </main>
   );
 }
 
-function pageHref(offset: number, accountId?: string) {
+function pageHref(offset: number, accountId?: string, categoryId?: string) {
   const q = new URLSearchParams({ offset: String(offset) });
   if (accountId) q.set("account_id", accountId);
+  if (categoryId) q.set("category_id", categoryId);
   return `/transacoes?${q}`;
-}
-
-function Nav() {
-  return (
-    <nav className="nav">
-      <Link href="/">Diagnóstico</Link>
-      <Link href="/conexoes">Conexões</Link>
-      <Link href="/transacoes">Transações</Link>
-    </nav>
-  );
 }

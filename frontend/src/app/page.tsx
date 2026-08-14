@@ -7,6 +7,8 @@
 
 import Link from "next/link";
 
+import { Nav } from "@/components/nav";
+
 // `INTERNAL_API_URL` e não `NEXT_PUBLIC_API_URL`: este componente roda no servidor,
 // dentro da rede do compose, onde `localhost` seria o próprio container do frontend.
 const API_URL = process.env.INTERNAL_API_URL ?? "http://backend:8000";
@@ -48,15 +50,12 @@ export default async function Home() {
 
   return (
     <main>
-      <nav className="nav">
-        <Link href="/">Diagnóstico</Link>
-        <Link href="/conexoes">Conexões</Link>
-        <Link href="/transacoes">Transações</Link>
-      </nav>
+      <Nav />
 
       <h1>Organizador Financeiro</h1>
       <p className="subtitle">
-        Fases 0 a 2 concluídas — infraestrutura, schema e integração com a Pluggy.
+        Fases 0 a 3 concluídas — infraestrutura, schema, integração com a Pluggy e
+        categorização por LLM.
       </p>
 
       <div className="card">
@@ -100,7 +99,8 @@ export default async function Home() {
       </div>
 
       <p className="next-steps">
-        Próximo passo: Fase 3 — categorização das transações pelo Ollama.
+        Fase 4 em andamento: a <Link href="/revisao">fila de revisão</Link> já
+        responde às perguntas do modelo. O dashboard é o próximo passo.
       </p>
     </main>
   );

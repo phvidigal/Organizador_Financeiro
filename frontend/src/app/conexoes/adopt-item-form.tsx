@@ -9,7 +9,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { BROWSER_API } from "../lib/api";
+import { BROWSER_API } from "@/lib/api";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

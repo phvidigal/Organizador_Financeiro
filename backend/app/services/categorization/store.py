@@ -13,6 +13,11 @@ São seis colunas numa tacada só:
 `kind` é a que se esquece, e é a que importa para o dashboard: sem herdá-la de
 `categories.kind`, um Pix classificado como "Transferências" continua contando
 como gasto.
+
+São dois caminhos de escrita, e a diferença entre eles não é cosmética:
+`apply_decision` grava a decisão do LLM, `apply_manual_decision` grava a do
+titular. O segundo zera `category_confidence` e depende de o chamador ter
+registrado a linha de `categorization_reviews` — ver o docstring de lá.
 """
 
 import logging
@@ -65,6 +70,52 @@ async def apply_decision(
 
     await session.execute(
         update(Transaction).where(Transaction.id == transaction_id).values(**values)
+    )
+
+
+async def apply_manual_decision(
+    session: AsyncSession,
+    *,
+    transaction_id: uuid.UUID,
+    category_id: uuid.UUID,
+    kind: str,
+    now: datetime | None = None,
+) -> None:
+    """Grava a correção do titular. Irmã de `apply_decision`, e mora aqui pelo mesmo
+    motivo: as seis colunas andam juntas, e quem escreve o próprio `UPDATE` esquece
+    o `kind`.
+
+    Duas diferenças em relação ao caminho do LLM:
+
+    * o status é sempre `CATEGORIZED`. Não existe "revisão que precisa de revisão" —
+      `NEEDS_REVIEW` é o pedido de resposta, e esta função é a resposta;
+    * **`category_confidence` é zerada.** Confiança é a autoavaliação de um modelo;
+      uma escolha humana não tem análogo, e deixar o número anterior faria a coluna
+      significar coisas diferentes conforme o `category_source` — "quão certo o LLM
+      estava" em linhas MANUAL e "quão certo ele está" nas demais.
+
+    Zerar só é seguro porque o chamador grava antes uma linha em
+    `categorization_reviews` com `previous_confidence`. **A medição de calibração
+    passa a se ler de lá**, não de `transactions.category_confidence`. Sem a linha
+    de review, este `None` destruiria exatamente o dado que a Fase 3 deixou pendente.
+
+    O `kind` vem do chamador, e não de `categories.kind` como no caminho do LLM,
+    porque a tela de revisão permite sobrepô-lo: um Pix enviado para pagar um
+    serviço é despesa mesmo apontando para uma categoria TRANSFER, e só o titular
+    sabe disso. Herdar o `kind` da categoria continua sendo o default — quem decide
+    é `app/api/v1/transactions.py`.
+    """
+    await session.execute(
+        update(Transaction)
+        .where(Transaction.id == transaction_id)
+        .values(
+            category_id=category_id,
+            category_source=CategorySource.MANUAL.value,
+            categorization_status=CategorizationStatus.CATEGORIZED.value,
+            category_confidence=None,
+            categorized_at=now or datetime.now(UTC),
+            kind=kind,
+        )
     )
 
 

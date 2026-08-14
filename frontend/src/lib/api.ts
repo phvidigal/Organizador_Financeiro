@@ -32,6 +32,14 @@ export type BankConnection = {
   error: Record<string, unknown> | null;
 };
 
+export type CategoryMapReport = {
+  mapped: number;
+  already_mapped: number;
+  unmatched_pluggy: string[];
+  unmapped_local: string[];
+  conflicts: string[];
+};
+
 export type SyncOutcome = {
   status: string;
   started_at: string;
@@ -41,6 +49,7 @@ export type SyncOutcome = {
   item_refresh_supported: boolean | null;
   warnings: string[];
   error: Record<string, unknown> | null;
+  categories: CategoryMapReport | null;
 };
 
 export type SyncStatus = {
@@ -78,16 +87,54 @@ export type Transaction = {
   external_id: string | null;
   amount: Money;
   currency_code: string;
-  kind: "INCOME" | "EXPENSE" | "TRANSFER";
+  kind: Kind;
   date: string;
   posted_at: string | null;
   description_raw: string;
   description_clean: string | null;
   category_id: string | null;
-  categorization_status: string;
-  category_source: string | null;
+  categorization_status: CategorizationStatus;
+  category_source: CategorySource | null;
+  // A confiança **crua** do modelo, entre 0 e 1 — string, como todo NUMERIC.
+  // É NULL depois de uma correção manual: o número passa a morar em
+  // `categorization_reviews`, no backend.
+  category_confidence: Money | null;
   pluggy_category_id: string | null;
   pluggy_category_name: string | null;
+};
+
+export type CategorizationStatus =
+  | "PENDING"
+  | "CATEGORIZED"
+  | "NEEDS_REVIEW"
+  | "FAILED";
+
+export type CategorySource = "PLUGGY" | "RULE" | "EMBEDDING" | "LLM" | "MANUAL";
+
+export type Kind = "INCOME" | "EXPENSE" | "TRANSFER";
+
+// Espelha `CategoryRead` do backend, que sai de `load_catalog` — o mesmo catálogo
+// que vira o `enum` do JSON Schema do Ollama. O rótulo é qualificado
+// ("Alimentação > Delivery") porque o nome cru pode ser ambíguo entre dois pais.
+export type Category = {
+  id: string;
+  label: string;
+  kind: Kind;
+  root_id: string;
+  pluggy_category_id: string | null;
+};
+
+export type QueueCounts = {
+  pending: number;
+  categorized: number;
+  needs_review: number;
+  failed: number;
+};
+
+export type CategorizationStatusRead = {
+  tenant_id: string;
+  running: boolean;
+  queue: QueueCounts;
 };
 
 export type Page<T> = {
@@ -124,6 +171,21 @@ export function formatMoney(value: Money | null): string {
   if (value === null) return "—";
   return BRL.format(Number(value));
 }
+
+/** Confiança do modelo em pt-BR, com as três casas que o NUMERIC(4,3) carrega. */
+export function formatConfidence(value: Money | null): string {
+  if (value === null) return "—";
+  return Number(value).toLocaleString("pt-BR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 3,
+  });
+}
+
+export const KIND_LABEL: Record<Kind, string> = {
+  INCOME: "entrada",
+  EXPENSE: "saída",
+  TRANSFER: "transferência",
+};
 
 export function formatDate(value: string | null): string {
   if (!value) return "—";

@@ -5,8 +5,9 @@ LLM self-hosted (Ollama), multi-tenancy com RLS e conformidade com a LGPD.
 Uso pessoal, um único tenant ativo, schema já preparado para vários.
 
 **Estado:** Fases 0 a 3 concluídas (infra, schema, integração Pluggy,
-categorização por LLM). Fase 4 (frontend) é a próxima. O roadmap completo e o
-racional das decisões estão no [README](README.md).
+categorização por LLM). Fase 4 em andamento: a **tela de revisão está de pé**, o
+**dashboard não**. O roadmap completo e o racional das decisões estão no
+[README](README.md).
 
 Idioma: código e schema em inglês; comentários, docs e conteúdo de usuário em
 pt-BR. Commits em pt-BR.
@@ -53,6 +54,17 @@ daquele módulo e quebraria as três regras em silêncio.
 última é a que se esquece, e é a que importa para o dashboard — sem herdá-la de
 `categories.kind`, um pagamento de fatura classificado como "Transferências"
 continua contando como gasto.
+
+`apply_manual_decision` é a irmã, para a correção do titular: mesmas seis colunas,
+`category_source = 'MANUAL'`, status sempre `CATEGORIZED` e
+**`category_confidence = NULL`**.
+
+Zerar a confiança só é seguro porque o chamador grava **antes** uma linha em
+`categorization_reviews` com `previous_confidence`. É de lá que a calibração se lê,
+não de `transactions.category_confidence`. Quem chamar `apply_manual_decision` sem
+registrar a revisão destrói exatamente o dado que a tela existe para produzir — e
+não há erro nem log, só uma medição que nunca fecha. O único chamador é
+`PATCH /transactions/{id}`, e ele faz as duas coisas na mesma transação.
 
 `reset_categorization` é o caminho inverso, e recusa `MANUAL`.
 
@@ -281,7 +293,54 @@ em `pluggy/runner.py`, porque aquele pacote não deve conhecer a Fase 3.
   A regra 4 do `SYSTEM_PROMPT` é o que separa as duas — mexer nela sem conferir
   "Valor recebido de Investimentos" transforma receita em transferência.
 
-## Fases 4 e 5
+## Fase 4 — como a revisão funciona
+
+Etapa A concluída (fila de revisão e correção manual); o **dashboard ainda não
+existe**.
+
+`PATCH /transactions/{id}` (`app/api/v1/transactions.py`) é o único caminho que
+grava `category_source = 'MANUAL'`. Ele faz duas escritas na mesma transação, e a
+ordem não é negociável:
+
+1. `INSERT` em `categorization_reviews` com o estado **anterior**
+   (`previous_category_id`, `previous_kind`, `previous_source`, `previous_status`,
+   `previous_confidence`);
+2. `store.apply_manual_decision`, que sobrescreve.
+
+Sem o passo 1, depois do UPDATE não dá para saber se o titular **confirmou** a
+escolha do LLM ou a **corrigiu** — e é essa diferença, e só ela, que responde se
+`0.450` erra mais que `0.950`.
+
+O que é fácil de quebrar sem saber:
+
+- **`categorization_reviews` não tem `UPDATE` concedido ao `app_user`** (migration
+  `0005`). O log é append-only por privilégio, não por convenção: corrigir de novo
+  acrescenta linha, nunca reescreve. Precisa da tabela em `TENANT_SCOPED_TABLES`,
+  senão o teste de RLS não a olha.
+- **Confirmar a sugestão também grava.** Uma tela que só registrasse discordância
+  mediria erro com numerador sem denominador. O botão "Confirmar" existe para isso,
+  e por isso custa um clique.
+- **`GET /categories` reusa `load_catalog`**, o mesmo carregamento que monta o
+  `enum` do JSON Schema do Ollama. É o que garante que o humano escolha da mesma
+  lista que o modelo pôde escolher; duas listas montadas por caminhos diferentes
+  divergiriam na primeira categoria criada, e a correção deixaria de ser
+  comparável. Só categorias ativas — transação apontando para uma desativada mostra
+  "categoria inativa" em vez de um nome inventado.
+- **A regra de `NEEDS_REVIEW` não é recomputada no cliente.** A tela mostra a
+  confiança e o palpite da Pluggy como fatos crus; o veredito vive em
+  `decide.decide` e em nenhum outro lugar.
+- **`kind` é editável na tela, separado da categoria.** O default é herdado de
+  `categories.kind`; o override existe porque `Pix enviado` é TRANSFER mas pagar
+  alguém por um serviço é despesa, e só o titular sabe qual dos dois é.
+- **Corrigir também acontece em `/transacoes`**, e não só na fila: um erro do LLM
+  com confiança 0,95 e concordância com a Pluggy nunca entra em `NEEDS_REVIEW`, e
+  sem esse caminho ficaria sem conserto.
+
+Frontend em `frontend/src/`: `lib/api.ts` (cliente e tipos),
+`components/category-picker.tsx` (o controle que grava), `components/nav.tsx`,
+`app/revisao/page.tsx`. O alias `@/*` aponta para `src/`.
+
+## Fases 4 (dashboard) e 5
 
 Contexto acumulado em [`docs/fases-3-5.md`](docs/fases-3-5.md): o que já está
 decidido e o que segue em aberto no frontend e na LGPD. **Nada disso está
