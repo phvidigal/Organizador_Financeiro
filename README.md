@@ -4,8 +4,8 @@ SaaS de finanças pessoais com agregação via Open Finance (Pluggy), categoriza
 automática por LLM self-hosted (Ollama) e conformidade com a LGPD desde o schema.
 
 **Estado atual: Fases 0 a 3 concluídas** — infraestrutura, modelagem, integração
-com a Pluggy e categorização por LLM. A Fase 4 está em andamento: a fila de revisão
-já responde às perguntas do modelo; o dashboard ainda não existe.
+com a Pluggy e categorização por LLM. A Fase 4 está construída — fila de revisão e
+painel mensal —, e falta conferir o painel contra o extrato real.
 
 ## Stack
 
@@ -45,7 +45,8 @@ Aplique as migrations:
 docker compose exec backend alembic upgrade head
 ```
 
-- Frontend: <http://localhost:3000> — painel de diagnóstico das três conexões
+- Frontend: <http://localhost:3000/painel> — o mês por receita, despesa e categoria;
+  <http://localhost:3000> é o diagnóstico das três conexões
 - API: <http://localhost:8000/docs>
 
 Testes:
@@ -146,10 +147,12 @@ legacy/      Protótipo SQLite original, apenas como referência
       avaliação da categorização nativa
 - [x] **Fase 3** — Categorização via Ollama (`qwen3.5:9b`), com saída restrita por
       JSON Schema e fila de revisão
-- [ ] **Fase 4** — Dashboard, filtros e tela de revisão de categorias
+- [ ] **Fase 4** — Dashboard, filtros e tela de revisão de categorias · ⏳ falta
+      conferir o painel contra o extrato real
   - [x] tela de revisão e correção manual (`PATCH /transactions/{id}`,
         `categorization_reviews`)
-  - [ ] dashboard e filtros por período/categoria/conta
+  - [x] painel mensal (`GET /dashboard/summary`, `/painel`): filtro por mês e
+        conta, categoria como drill-down para o extrato
 - [ ] **Fase 5** — LGPD: criptografia em repouso, retenção e registro de consentimento
 
 O contexto já levantado para as Fases 4 e 5 — decisões tomadas, questões em
@@ -157,6 +160,26 @@ aberto e as armadilhas de cada uma — está em
 [`docs/fases-3-5.md`](docs/fases-3-5.md). A referência da API Pluggy, com marcação
 do que foi verificado na doc oficial e do que ainda precisa ser confirmado, está
 em [`docs/pluggy-api.md`](docs/pluggy-api.md).
+
+### Como o painel soma
+
+Receita e despesa somadas **por `kind`, com sinal**, e agrupadas por categoria com
+a raiz da árvore como subtotal. `TRANSFER` fica fora do resultado e aparece à
+parte, como "entrou X, saiu Y" — pagamento de fatura, Pix entre contas próprias e
+aplicação em investimento são dinheiro mudando de lugar.
+
+Duas escolhas que não são óbvias:
+
+- **O sinal não decide o lado.** Um estorno do iFood categorizado como
+  `Alimentação > Delivery` é despesa com valor positivo e *abate* o gasto. Separar
+  pelo sinal o contaria como receita.
+- **O que ainda não foi decidido entra no total, e a tela diz quanto é.** Linha na
+  fila do LLM ou esperando revisão tem natureza provisória. Tirá-la esconderia
+  gasto real; deixá-la sem aviso daria um número errado com cara de certo. Cada
+  card mostra "inclui R$ X sem decisão", com link para a revisão.
+
+Cada categoria leva ao extrato filtrado pelo mesmo mês e `kind`, onde a linha se
+corrige — e a correção muda o painel na hora.
 
 ### Como a Fase 3 categoriza
 
