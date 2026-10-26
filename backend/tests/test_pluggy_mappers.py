@@ -24,6 +24,7 @@ from app.services.pluggy.mappers import (
     map_account,
     map_item,
     map_transaction,
+    minimize_raw_payload,
     normalize_amount,
     parse_pluggy_date,
 )
@@ -32,6 +33,7 @@ from tests.pluggy_fixtures import (
     BANK_ACCOUNT_ID,
     CREDIT_ACCOUNT_ID,
     ITEM_JSON,
+    TRANSACTION_WITH_PERSONAL_DATA_JSON,
     TRANSACTIONS_CREDIT_JSON,
     TRANSACTIONS_PAGE_1_JSON,
     TRANSACTIONS_PAGE_2_JSON,
@@ -320,3 +322,70 @@ def test_unknown_account_type_fails_loudly() -> None:
 
     with pytest.raises(ValueError, match="tipo de conta desconhecido"):
         map_account(account, tenant_id=TENANT, bank_connection_id=CONNECTION)
+
+
+# --- raw_payload sem dado pessoal de terceiros -------------------------------
+
+
+def personal_data_row() -> dict:
+    return map_transaction(
+        _loads(TRANSACTION_WITH_PERSONAL_DATA_JSON.encode()),
+        tenant_id=TENANT,
+        account_id=BANK_ACCOUNT_ID,
+        account_type=AccountType.BANK.value,
+    )
+
+
+def test_raw_payload_drops_third_party_personal_data() -> None:
+    """Nome, CPF, agência e conta de quem mandou e de quem recebeu o Pix não são
+    necessários para reprocessar nada — e não são do titular (LGPD, art. 6º, III)."""
+    dumped = json.dumps(personal_data_row()["raw_payload"], ensure_ascii=False)
+
+    for leaked in (
+        "Fulano de Tal",
+        "Ciclano Beltrano",
+        "123.456.789-00",
+        "987.654.321-00",
+        "12345-6",
+        "65432-1",
+        "aluguel do apto 12",
+        "E000000002026080500000000000001",
+        "23790000000000000000000000000000000000000000000",
+        "4321",
+    ):
+        assert leaked not in dumped, leaked
+
+
+def test_raw_payload_keeps_what_reprocessing_needs() -> None:
+    raw = personal_data_row()["raw_payload"]
+
+    assert raw["amount"] == "850.00"
+    assert raw["type"] == "CREDIT"
+    assert raw["descriptionRaw"] == "PIX RECEBIDO FULANO DE TAL"
+    assert raw["categoryId"] == "05070000"
+    # O meio e o *tipo* de documento ficam: Pix de CNPJ tende a ser pagamento por
+    # serviço, e o tipo não identifica ninguém.
+    assert raw["paymentData"] == {
+        "paymentMethod": "PIX",
+        "payer": {"documentNumber": {"type": "CPF"}},
+        "receiver": {"documentNumber": {"type": "CPF"}},
+    }
+    assert raw["creditCardMetadata"] == {
+        "installmentNumber": 2,
+        "totalInstallments": 10,
+        "totalAmount": "8500.00",
+        "payeeMCC": 6513,
+    }
+
+
+def test_raw_payload_drops_fields_nobody_decided_to_keep() -> None:
+    """Lista de permissão: um campo novo da Pluggy não começa a ser gravado sozinho."""
+    assert "novoCampoDaPluggy" not in personal_data_row()["raw_payload"]
+
+
+def test_minimize_tolerates_malformed_payment_data() -> None:
+    raw = minimize_raw_payload(
+        {"id": "x", "paymentData": {"payer": "texto", "receiver": {"documentNumber": None}}}
+    )
+
+    assert raw == {"id": "x", "paymentData": {}}

@@ -6,6 +6,10 @@ from typing import Annotated, Literal
 from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Nomes pelos quais o app é alcançado sem sair da máquina: o navegador do host e a
+# rede interna do compose. Fora daqui, só com autenticação (ver `_hosts_are_local`).
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "backend"})
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -41,6 +45,20 @@ class Settings(BaseSettings):
     # --- Segurança / LGPD ----------------------------------------------------
     app_encryption_key: str | None = None
 
+    # Valores aceitos no header `Host`. É o que barra DNS rebinding: uma página
+    # maliciosa que faça o próprio domínio resolver para 127.0.0.1 chega aqui com
+    # `Host: dominio-dela`, e é recusada antes de qualquer rota. `backend` é o nome
+    # do serviço no compose — o Server Component do Next chama por ele.
+    #
+    # Só nomes locais, e isso é verificado no boot (ver `_hosts_are_local`).
+    allowed_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: sorted(LOCAL_HOSTS)
+    )
+
+    # `GET /pluggy/diagnostics` despeja a resposta da Pluggy. Desligado por padrão:
+    # liga-se para depurar um connector novo e desliga-se em seguida.
+    enable_pluggy_diagnostics: bool = False
+
     # `NoDecode` desliga o parse automático que o pydantic-settings faz em campos
     # de tipo complexo: sem ele, a fonte de ambiente tenta `json.loads` na string
     # e falha antes de o validador abaixo receber o valor.
@@ -48,12 +66,30 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000"]
     )
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "allowed_hosts", mode="before")
     @classmethod
     def _split_csv(cls, v: object) -> object:
         # No .env a variável é uma string separada por vírgula.
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _hosts_are_local(cls, v: list[str]) -> list[str]:
+        """Recusa subir aceitando host de fora da máquina.
+
+        **Não há autenticação**: quem alcança a API lê o extrato inteiro. Abrir o app
+        para o celular ou outro computador exige pôr o IP ou o nome da máquina aqui
+        — e é exatamente esse passo que precisa esbarrar num erro dizendo o que falta,
+        e não funcionar em silêncio. Quando houver login, esta trava sai junto.
+        """
+        foreign = [host for host in v if host not in LOCAL_HOSTS]
+        if foreign:
+            raise ValueError(
+                f"ALLOWED_HOSTS com host fora da máquina ({', '.join(foreign)}): acesso "
+                "pela rede exige autenticação, que ainda não existe"
+            )
         return v
 
     @field_validator(

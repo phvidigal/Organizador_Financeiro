@@ -78,6 +78,96 @@ ACCOUNT_ROW_KEYS = frozenset(
 )
 
 
+# --- raw_payload --------------------------------------------------------------
+#
+# O que da resposta crua de uma transação fica guardado em `raw_payload`.
+#
+# **Lista de permissão, não de bloqueio** — mesmo critério de
+# `client._SAFE_AUTH_ERROR_FIELDS`. A resposta da Pluggy traz, em `paymentData`,
+# nome, CPF/CNPJ, agência e conta de **terceiros**: quem mandou o Pix, quem o
+# recebeu. Nada disso é necessário para reprocessar a transação, e minimização é
+# princípio da LGPD (art. 6º, III). Enumerar o que é seguro é a única forma de
+# garantir que um campo novo da Pluggy não comece a ser gravado em silêncio: o que
+# não está aqui cai fora, e entrar exige decidir.
+#
+# A migration `0006_minimize_raw_payload` aplicou esta mesma lista às linhas já
+# gravadas, numa cópia congelada. Mudou a lista? A migration não muda junto — ela
+# descreve o que foi feito naquele dia.
+RAW_TRANSACTION_FIELDS = frozenset(
+    {
+        "id",
+        "accountId",
+        "description",
+        "descriptionRaw",
+        "amount",
+        "amountInAccountCurrency",
+        "currencyCode",
+        "date",
+        "type",
+        "status",
+        "category",
+        "categoryId",
+        "balance",
+        "operationType",
+        "providerCode",
+        "providerId",
+        "createdAt",
+        "updatedAt",
+        # Empresa (nome, CNPJ, CNAE): dado público de pessoa jurídica.
+        "merchant",
+    }
+)
+
+# Parcelamento e MCC servem para categorizar; o número do cartão, não.
+RAW_CREDIT_CARD_FIELDS = frozenset(
+    {"installmentNumber", "totalInstallments", "totalAmount", "payeeMCC", "purchaseDate", "billId"}
+)
+
+
+def _document_type(party: Any) -> str | None:
+    """`"CPF"` ou `"CNPJ"` de quem pagou ou recebeu — o tipo, nunca o número."""
+    if not isinstance(party, dict):
+        return None
+    document = party.get("documentNumber")
+    if not isinstance(document, dict):
+        return None
+    kind = document.get("type")
+    return kind if isinstance(kind, str) else None
+
+
+def minimize_raw_payload(tx: dict[str, Any]) -> dict[str, Any]:
+    """A transação crua da Pluggy, sem dado pessoal de terceiros. Pura.
+
+    De `paymentData` sobram só o meio (`paymentMethod`: PIX, TED, boleto) e o
+    **tipo** de documento de cada ponta. Este último é sinal de categorização que
+    vale guardar — Pix vindo de CNPJ tende a ser pagamento por serviço, vindo de CPF
+    pode ser qualquer coisa — e não identifica ninguém.
+
+    Limite que esta função não resolve: `descriptionRaw` costuma trazer o nome do
+    remetente ("PIX RECEBIDO FULANO"), e é o insumo do LLM. Fica.
+    """
+    raw: dict[str, Any] = {key: value for key, value in tx.items() if key in RAW_TRANSACTION_FIELDS}
+
+    payment = tx.get("paymentData")
+    if isinstance(payment, dict):
+        kept: dict[str, Any] = {}
+        if isinstance(payment.get("paymentMethod"), str):
+            kept["paymentMethod"] = payment["paymentMethod"]
+        for party in ("payer", "receiver"):
+            document_type = _document_type(payment.get(party))
+            if document_type is not None:
+                kept[party] = {"documentNumber": {"type": document_type}}
+        raw["paymentData"] = kept
+
+    card = tx.get("creditCardMetadata")
+    if isinstance(card, dict):
+        raw["creditCardMetadata"] = {
+            key: value for key, value in card.items() if key in RAW_CREDIT_CARD_FIELDS
+        }
+
+    return jsonable(raw)
+
+
 # --- helpers ----------------------------------------------------------------
 
 
@@ -326,7 +416,8 @@ def map_transaction(
         "pluggy_category_id": _truncate(tx.get("categoryId"), 32),
         "pluggy_category_name": _truncate(tx.get("category"), 120),
         "categorization_status": CategorizationStatus.PENDING.value,
-        "raw_payload": jsonable(tx),
+        # Sem dado pessoal de terceiros; ver `RAW_TRANSACTION_FIELDS`.
+        "raw_payload": minimize_raw_payload(tx),
     }
     assert row.keys() == TRANSACTION_ROW_KEYS, (
         "map_transaction mudou de chaves sem atualizar o contrato — "

@@ -6,8 +6,8 @@ para que a decisão tomada numa fase não precise ser redescoberta na seguinte.
 Convenção: ✅ **decidido** (e por quê) · ⚠️ **em aberto** (precisa de decisão ou
 de dado real) · 🛠️ **implementado** (onde, e o que mudou em relação ao plano).
 
-**A Fase 3 foi construída** — a seção abaixo virou registro do que ficou de pé, e
-não mais plano. As Fases 4 e 5 continuam sem implementação nenhuma.
+**As Fases 3 e 4 foram construídas** — as seções delas viraram registro do que
+ficou de pé, e não mais plano. A Fase 5 continua sem implementação nenhuma.
 
 ---
 
@@ -248,7 +248,7 @@ transferência. Todas contavam como gasto.
 
 ---
 
-## Fase 4 — Frontend · 🛠️ tela de revisão implementada, dashboard não
+## Fase 4 — Frontend · 🛠️ revisão e painel implementados
 
 ### Três telas
 
@@ -332,6 +332,35 @@ despesa — é a razão de o campo existir.
 propósito: índice custa escrita em todo sync, e sem a query real do dashboard
 seria especulação. Medir com `EXPLAIN ANALYZE` na Fase 4 e só então decidir.
 
+🛠️ **Medido, e não precisa.** A query real é um `GROUP BY` de
+(moeda, `kind`, categoria, status) sobre um mês, em `app/services/dashboard.py`.
+Com 50 mil linhas sintéticas por tenant (cinco anos a ~800 por mês, dois tenants),
+sob `app_user` e RLS, ela usa `ix_transactions_tenant_date` num bitmap scan e roda
+em **0,7 ms**. `kind` entra no agrupamento depois do recorte por data, que já
+reduz a algumas centenas de linhas; um índice com ele só encareceria o sync. A
+medição com o volume real fica em `docs/pendencias-no-host.md`, por desencargo.
+
+🛠️ **O que a construção decidiu que o plano não tinha:**
+
+- **O sinal do valor não decide o lado.** A soma é por `kind`, com sinal: um
+  estorno categorizado como despesa é `EXPENSE` positivo e abate o gasto. "Entrou"
+  e "saiu" pelo sinal só aparecem para `TRANSFER`.
+- **Linha sem decisão entra no total, declarada.** `PENDING`, `NEEDS_REVIEW` e
+  `FAILED` carregam `kind` provisório. Excluí-las esconderia gasto real (o mesmo
+  argumento da invariante 4); incluí-las caladas daria número errado com cara de
+  certo. Cada total traz `undecided_total`, que está *dentro* dele.
+- **Só BRL nos totais.** O mapper grava o `currencyCode` da Pluggy, e somar dólar
+  com real daria um número sem unidade. A linha em outra moeda é contada à parte.
+  Não se sabe se o extrato real tem alguma — o aviso existe para não depender
+  disso.
+- **"Filtro por categoria" virou drill-down.** A quebra já é por categoria;
+  filtrar o painel por uma só repetiria a linha. Clicar abre `/transacoes` com
+  `category_id`, período e `kind`, que é onde a pergunta "por que esse número?"
+  termina — na linha que se corrige.
+- **Mês corrente no fuso de São Paulo**, calculado no Server Component, que roda em
+  UTC. E a tela vazia aponta para o mês do lançamento mais recente: no tier pessoal
+  a coleta é da Pluggy, e o mês corrente pode simplesmente não ter chegado.
+
 ### Onde o sync é disparado
 
 ✅ A decisão da Fase 2 é sync sob demanda, ao atualizar o app. O gatilho mora
@@ -357,7 +386,26 @@ já tem `users` com `hashed_password`, sem nada implementado em cima.
 
 ---
 
-## Fase 5 — LGPD e segurança · ⚠️ não implementada
+## Fase 5 — LGPD e segurança · ⚠️ não implementada (com uma antecipação)
+
+### 🛠️ Antecipado: minimização e acesso só local
+
+Uma revisão de segurança (out/2026) adiantou duas peças, porque eram vazamento e
+não plano:
+
+- **`raw_payload` deixou de guardar dado de terceiros.** A resposta da Pluggy traz
+  em `paymentData` nome, CPF/CNPJ, agência e conta de quem mandou e recebeu cada
+  Pix — gente que nunca consentiu com nada aqui. A gravação passou a ser por
+  lista de permissão (`mappers.RAW_TRANSACTION_FIELDS`), e a migration `0006`
+  limpou o histórico. Sobra o **tipo** de documento (CPF ou CNPJ), que é sinal de
+  categorização e não identifica ninguém.
+- **Limite que fica:** `description_raw` costuma trazer o nome do remetente
+  ("PIX RECEBIDO FULANO"). É o insumo do LLM e não tem como sair sem perder a
+  categorização. Se a Fase 5 criptografar algo, é por aqui que começa.
+- **Acesso só local, por construção.** Portas em `127.0.0.1`, `Host` validado no
+  backend e no Next, escrita de outra origem recusada, e o backend se recusa a
+  subir com host de rede configurado. Autenticação continua ⚠️ — e passa a ser
+  pré-requisito explícito para qualquer acesso de fora da máquina.
 
 ### O que realmente precisa de criptografia
 
@@ -370,8 +418,10 @@ existe de sensível aqui é menos do que o brief sugere:
 - tokens da Pluggy, **se** forem cacheados em banco (a API key dura ~2h; cachear
   em memória evita o problema por completo);
 - `taxNumber` e `owner` (CPF e nome do titular), que hoje são **deliberadamente
-  não persistidos**. Se a Fase 4 precisar deles, é aí que a criptografia em
-  repouso passa a ter objeto.
+  não persistidos** — e, desde a revisão de out/2026, também não aparecem no
+  `GET /pluggy/diagnostics`, que os despejava crus. Se a Fase 4 precisar deles, é
+  aí que a criptografia em repouso passa a ter objeto;
+- `description_raw`, que carrega nome de terceiros em Pix e TED (ver acima).
 
 Conclusão provável: a Fase 5 é mais sobre consentimento, retenção e exclusão do
 que sobre criptografia.
@@ -427,6 +477,6 @@ autenticação real.
 | **`Pix enviado` continua `TRANSFER`** | espelho não resolvido: pagar alguém por serviço é despesa. A regra 3b manda preferir a categoria do que foi pago, mas o resto fica fora dos gastos |
 | **O laço de aprendizado não existe** | o LLM não vê as correções `MANUAL`; realimentar é a pipeline híbrida. A tela já existe, e `categorization_reviews` é o insumo — falta a camada que lê dali |
 | **Limiar `LOW_CONFIDENCE = 0.70` continua sem calibração** | ele *dispara* (70 dos 137 `NEEDS_REVIEW`), e agora **há como medir**: `categorization_reviews` guarda `previous_confidence` ao lado da resposta. Falta volume de correções |
-| **O dashboard não existe** | é o que resta da Fase 4. A questão do índice com `kind` segue em aberto, e só se decide com `EXPLAIN ANALYZE` da query real |
+| ~~O dashboard não existe~~ | ✅ `/painel` e `GET /dashboard/summary`; índice com `kind` medido e descartado (0,7 ms com 50 mil linhas sintéticas). Falta conferir contra o extrato real |
 | Descrição corrigida na origem não invalida a categoria já gravada | escape é `POST /categorization/reset`, não invalidação automática |
 | O lock de categorização é por processo, como o do sync | ambos deixam de valer com `uvicorn --workers > 1` |

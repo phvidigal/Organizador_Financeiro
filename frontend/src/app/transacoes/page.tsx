@@ -18,6 +18,7 @@ import {
   type Category,
   formatDate,
   formatMoney,
+  type Kind,
   KIND_LABEL,
   type Page,
   serverFetch,
@@ -36,22 +37,29 @@ const SOURCE_LABEL: Record<string, string> = {
   MANUAL: "você",
 };
 
+// Filtros que atravessam a paginação. Período e `kind` chegam do painel, que abre
+// o extrato de uma categoria no mesmo recorte do total que a pessoa clicou.
+const FILTROS = ["account_id", "category_id", "date_from", "date_to", "kind"] as const;
+type Filtros = Partial<Record<(typeof FILTROS)[number], string>>;
+
 export default async function TransacoesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ offset?: string; account_id?: string; category_id?: string }>;
+  searchParams: Promise<Filtros & { offset?: string }>;
 }) {
   const params = await searchParams;
   const offset = Math.max(0, Number(params.offset ?? 0) || 0);
-  const accountId = params.account_id;
   const categoryId = params.category_id;
+  const filtros: Filtros = {};
+  for (const chave of FILTROS) {
+    if (params[chave]) filtros[chave] = params[chave];
+  }
 
   const query = new URLSearchParams({
     limit: String(PAGE_SIZE),
     offset: String(offset),
+    ...filtros,
   });
-  if (accountId) query.set("account_id", accountId);
-  if (categoryId) query.set("category_id", categoryId);
 
   const [page, accounts, categories] = await Promise.all([
     serverFetch<Page<Transaction>>(`/transactions?${query}`),
@@ -76,14 +84,33 @@ export default async function TransacoesPage({
 
   const { items, total } = page.data;
   const fim = Math.min(offset + PAGE_SIZE, total);
+  const temRecorte = Boolean(
+    filtros.category_id || filtros.date_from || filtros.date_to || filtros.kind,
+  );
 
   return (
     <main className="wide">
       <Nav />
       <h1>Transações</h1>
       <p className="subtitle">
-        {total} lançamentos sincronizados · exibindo {total === 0 ? 0 : offset + 1}–{fim}
+        {total} lançamentos {temRecorte ? "neste recorte" : "sincronizados"} · exibindo{" "}
+        {total === 0 ? 0 : offset + 1}–{fim}
       </p>
+
+      {temRecorte && (
+        <p className="row muted">
+          {categoryId && <span>{porId.get(categoryId)?.label ?? "categoria inativa"}</span>}
+          {filtros.date_from && filtros.date_to && (
+            <span>
+              {formatDate(filtros.date_from)} a {formatDate(filtros.date_to)}
+            </span>
+          )}
+          {filtros.kind && <span>{KIND_LABEL[filtros.kind as Kind] ?? filtros.kind}</span>}
+          <Link className="chip" href="/transacoes">
+            limpar filtros
+          </Link>
+        </p>
+      )}
 
       {accounts.ok && accounts.data.length > 0 && (
         <p className="row">
@@ -171,13 +198,13 @@ export default async function TransacoesPage({
         {offset > 0 && (
           <Link
             className="chip"
-            href={pageHref(Math.max(0, offset - PAGE_SIZE), accountId, categoryId)}
+            href={pageHref(Math.max(0, offset - PAGE_SIZE), filtros)}
           >
             ← anteriores
           </Link>
         )}
         {fim < total && (
-          <Link className="chip" href={pageHref(offset + PAGE_SIZE, accountId, categoryId)}>
+          <Link className="chip" href={pageHref(offset + PAGE_SIZE, filtros)}>
             próximas →
           </Link>
         )}
@@ -191,9 +218,7 @@ export default async function TransacoesPage({
   );
 }
 
-function pageHref(offset: number, accountId?: string, categoryId?: string) {
-  const q = new URLSearchParams({ offset: String(offset) });
-  if (accountId) q.set("account_id", accountId);
-  if (categoryId) q.set("category_id", categoryId);
+function pageHref(offset: number, filtros: Filtros) {
+  const q = new URLSearchParams({ offset: String(offset), ...filtros });
   return `/transacoes?${q}`;
 }

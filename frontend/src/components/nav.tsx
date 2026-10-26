@@ -10,10 +10,11 @@ import Link from "next/link";
 export function Nav() {
   return (
     <nav className="nav">
-      <Link href="/">Diagnóstico</Link>
-      <Link href="/conexoes">Conexões</Link>
+      <Link href="/painel">Painel</Link>
       <Link href="/transacoes">Transações</Link>
       <Link href="/revisao">Revisão</Link>
+      <Link href="/conexoes">Conexões</Link>
+      <Link href="/">Diagnóstico</Link>
     </nav>
   );
 }

@@ -9,6 +9,7 @@ sem testar nada.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.config import Settings
 
@@ -22,6 +23,8 @@ PLUGGY_VARS = (
     "PLUGGY_BASE_URL",
     "OLLAMA_MODEL",
     "CORS_ORIGINS",
+    "ALLOWED_HOSTS",
+    "ENABLE_PLUGGY_DIAGNOSTICS",
 )
 
 
@@ -81,8 +84,26 @@ def test_defaults_survive_when_nothing_is_set(env) -> None:
     assert settings.pluggy_base_url == "https://api.pluggy.ai"
     assert settings.pluggy_client_id is None
     assert settings.environment == "development"
+    # O diagnóstico despeja a resposta da Pluggy: só liga quem pedir.
+    assert settings.enable_pluggy_diagnostics is False
 
 
 @pytest.mark.parametrize("raw", ["http://a:3000,http://b:3001", " http://a:3000 , http://b:3001 "])
 def test_cors_origins_split_ignores_surrounding_space(env, raw: str) -> None:
     assert env(CORS_ORIGINS=raw).cors_origins == ["http://a:3000", "http://b:3001"]
+
+
+def test_allowed_hosts_default_is_local_only(env) -> None:
+    assert set(env().allowed_hosts) == {"localhost", "127.0.0.1", "::1", "backend"}
+
+
+def test_allowed_hosts_accepts_a_local_subset(env) -> None:
+    assert env(ALLOWED_HOSTS=" localhost , backend ").allowed_hosts == ["localhost", "backend"]
+
+
+@pytest.mark.parametrize("raw", ["localhost,192.168.0.10", "meu-pc.local", "*"])
+def test_foreign_allowed_host_refuses_to_boot(env, raw: str) -> None:
+    """Não há login. Abrir o app para a rede tem de esbarrar num erro que diga o que
+    falta — e não funcionar em silêncio com o extrato exposto a quem estiver no Wi-Fi."""
+    with pytest.raises(ValidationError, match="exige autenticação"):
+        env(ALLOWED_HOSTS=raw)

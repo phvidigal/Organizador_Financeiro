@@ -6,12 +6,15 @@ deploy ruim e ter de restaurar backup. E como esta migration cria objetos que o
 volta é justamente onde o esquecimento aparece.
 """
 
+import json
 import uuid
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.services.pluggy.client import _loads
+from app.services.pluggy.mappers import jsonable, minimize_raw_payload
 from tests.conftest import (
     create_database,
     downgrade_migrations,
@@ -19,6 +22,7 @@ from tests.conftest import (
     run_migrations,
     url_for_database,
 )
+from tests.pluggy_fixtures import TRANSACTION_WITH_PERSONAL_DATA_JSON
 
 # Mesmo event loop das fixtures de sessão (ver pyproject.toml).
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -153,3 +157,57 @@ async def test_investment_tree_is_transfer_not_expense(admin_session) -> None:
         text("SELECT kind FROM categories WHERE name = 'Rendimentos e investimentos'")
     )
     assert yield_kind == "INCOME"
+
+
+async def test_0006_strips_personal_data_already_stored() -> None:
+    """A linha gravada antes da `0006` — com `paymentData` inteiro, como o sync
+    gravava — sai dela igual ao que `minimize_raw_payload` produz hoje.
+
+    É a guarda da cópia congelada: a migration não importa a função, de propósito,
+    e este teste é o que garante que as duas listas eram a mesma no dia em que a
+    limpeza rodou.
+    """
+    db_name = f"migration_0006_{uuid.uuid4().hex[:8]}"
+    await create_database(db_name)
+    url = url_for_database(db_name)
+    tx = _loads(TRANSACTION_WITH_PERSONAL_DATA_JSON.encode())
+
+    try:
+        run_migrations(url, "0005_categorization_reviews")
+
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            account_id = uuid.uuid4()
+            await conn.execute(
+                text(
+                    "INSERT INTO accounts (id, tenant_id, type, name) VALUES "
+                    "(:id, '00000000-0000-0000-0000-000000000001', 'BANK', 'Conta')"
+                ),
+                {"id": str(account_id)},
+            )
+            # SQL direto, e não `ingestion.py`: o objetivo é reproduzir o estado que
+            # o código *antigo* deixou, e o código atual já não grava assim.
+            await conn.execute(
+                text(
+                    "INSERT INTO transactions (tenant_id, account_id, source, external_id, "
+                    "amount, kind, date, description_raw, raw_payload) VALUES "
+                    "('00000000-0000-0000-0000-000000000001', :account, 'PLUGGY', 'pii-1', "
+                    "850.00, 'INCOME', DATE '2026-08-05', 'PIX', CAST(:payload AS jsonb))"
+                ),
+                {"account": str(account_id), "payload": json.dumps(jsonable(tx))},
+            )
+        await engine.dispose()
+
+        run_migrations(url)
+
+        engine = create_async_engine(url)
+        async with engine.connect() as conn:
+            stored = await conn.scalar(
+                text("SELECT raw_payload FROM transactions WHERE external_id = 'pii-1'")
+            )
+        await engine.dispose()
+
+        assert stored == minimize_raw_payload(tx)
+        assert "Fulano de Tal" not in json.dumps(stored)
+    finally:
+        await drop_database(db_name)

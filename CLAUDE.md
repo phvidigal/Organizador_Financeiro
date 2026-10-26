@@ -5,9 +5,10 @@ LLM self-hosted (Ollama), multi-tenancy com RLS e conformidade com a LGPD.
 Uso pessoal, um único tenant ativo, schema já preparado para vários.
 
 **Estado:** Fases 0 a 3 concluídas (infra, schema, integração Pluggy,
-categorização por LLM). Fase 4 em andamento: a **tela de revisão está de pé**, o
-**dashboard não**. O roadmap completo e o racional das decisões estão no
-[README](README.md).
+categorização por LLM). Fase 4 construída — **tela de revisão** e **painel
+mensal** —, falta conferir o painel contra o extrato real (ver
+[`docs/pendencias-no-host.md`](docs/pendencias-no-host.md)). O roadmap completo e
+o racional das decisões estão no [README](README.md).
 
 Idioma: código e schema em inglês; comentários, docs e conteúdo de usuário em
 pt-BR. Commits em pt-BR.
@@ -84,8 +85,9 @@ senão ela escapa do teste de isolamento.
 
 ### 3. Dinheiro é `NUMERIC(18,2)`, nunca float
 
-Sinal normalizado na ingestão: negativo = saída, sempre. A resposta crua da
-origem fica em `raw_payload`.
+Sinal normalizado na ingestão: negativo = saída, sempre. A resposta da origem
+fica em `raw_payload` — minimizada, sem dado pessoal de terceiros (ver
+"Segurança").
 
 ### 4. `kind` é separado de categoria
 
@@ -110,6 +112,31 @@ divergiram — corrija e **apague o arquivo gerado**.
 Declarou `default=` num modelo? Declare `server_default=` junto, senão o
 autogenerate propõe dropar o default do banco e todo `INSERT` em SQL cru passa a
 violar `NOT NULL`.
+
+### 6. Segurança — o app não tem login, e estas camadas são o que o substitui
+
+Quem alcança a API lê e altera o extrato inteiro. Enquanto não houver
+autenticação, quatro regras mantêm esse "quem" restrito ao titular, na própria
+máquina — e quebrar qualquer uma delas abre o extrato sem erro nenhum:
+
+- **Porta só em `127.0.0.1`** (`docker-compose.yml`). Sem o prefixo, o Docker
+  publica em todas as interfaces e o Wi-Fi inteiro entra — no Postgres, como
+  superusuário.
+- **`Host` local** (`TrustedHostMiddleware` no backend com `Settings.allowed_hosts`;
+  `frontend/src/middleware.ts` no Next). É o que barra DNS rebinding.
+  `Settings._hosts_are_local` **recusa subir** com host de fora da máquina: abrir
+  o app para a rede passa obrigatoriamente por implementar login antes. Não
+  afrouxe a trava sem trazer a autenticação junto.
+- **Escrita de outra origem é recusada** (`app/core/security.py`). O CORS esconde
+  a resposta, mas não impede a execução de um POST simples.
+- **`raw_payload` por lista de permissão** (`mappers.RAW_TRANSACTION_FIELDS`). O
+  que a Pluggy manda em `paymentData` — nome, CPF/CNPJ, agência e conta de quem
+  pagou ou recebeu — não chega ao banco. Campo novo só entra por decisão
+  explícita, nunca por ter aparecido na resposta. A migration `0006` limpou o
+  histórico com uma cópia congelada da lista; não a edite junto.
+
+Testes: `tests/test_api_security.py`, `tests/test_config.py`,
+`tests/test_pluggy_mappers.py` e `tests/test_migrations.py`.
 
 ---
 
@@ -136,6 +163,11 @@ docker compose exec backend ruff check . --fix
 
 ## Particularidades do ambiente
 
+- **O código é escrito na nuvem; o app roda em outra máquina.** Não há como
+  executar nada no host a partir da sessão. Mudança que exija comando lá
+  (rebuild, migration, conferência com dado real) entra em
+  [`docs/pendencias-no-host.md`](docs/pendencias-no-host.md) no mesmo commit —
+  é a única lista que o titular consulta antes de subir o app.
 - **Docker Desktop** pode não estar rodando; precisa ser iniciado à mão no Windows.
 - **Node não está instalado no host.** O frontend só roda em container.
 - **Ollama roda fora do Docker**, alcançado em `host.docker.internal:11434`.
@@ -148,7 +180,8 @@ docker compose exec backend ruff check . --fix
   asyncpg quebra com "attached to a different loop". Teste síncrono não pode
   ficar num módulo com esse marcador — use `tests/test_ingestion_pure.py`,
   `tests/test_pluggy_pure.py`, `tests/test_pluggy_mappers.py`,
-  `tests/test_categorization_pure.py` ou `tests/test_config.py`.
+  `tests/test_categorization_pure.py`, `tests/test_dashboard_pure.py` ou
+  `tests/test_config.py`.
 - **`docker compose restart` não relê o `.env`.** As variáveis são injetadas na
   criação do container; depois de editar o arquivo é
   `docker compose up -d --force-recreate backend`. E `get_settings()` é
@@ -201,8 +234,10 @@ O sync **lê, não atualiza**: `PATCH /items` é recusado no tier pessoal
 ### Endpoint temporário
 
 `GET /pluggy/diagnostics` (`app/api/v1/pluggy_diagnostics.py`) despeja a resposta
-crua da Pluggy ao lado do que seria gravado. Foi escrito para a validação da Fase
-2 e continua útil para depurar connector novo. Bloqueado em produção; nunca
+da Pluggy ao lado do que seria gravado. Foi escrito para a validação da Fase 2 e
+continua útil para depurar connector novo. **Desligado por padrão**: responde 404
+até `ENABLE_PLUGGY_DIAGNOSTICS=true`. Mesmo ligado, passa pelos filtros da
+gravação — sem `taxNumber`, `owner` nem `paymentData` de terceiros — e nunca
 devolve valor de segredo, só nomes de campo.
 
 ### Limitações conhecidas
@@ -295,8 +330,8 @@ em `pluggy/runner.py`, porque aquele pacote não deve conhecer a Fase 3.
 
 ## Fase 4 — como a revisão funciona
 
-Etapa A concluída (fila de revisão e correção manual); o **dashboard ainda não
-existe**.
+Duas partes: a fila de revisão com a correção manual (esta seção) e o painel
+(a seguinte).
 
 `PATCH /transactions/{id}` (`app/api/v1/transactions.py`) é o único caminho que
 grava `category_source = 'MANUAL'`. Ele faz duas escritas na mesma transação, e a
@@ -338,22 +373,48 @@ O que é fácil de quebrar sem saber:
 
 Frontend em `frontend/src/`: `lib/api.ts` (cliente e tipos),
 `components/category-picker.tsx` (o controle que grava), `components/nav.tsx`,
-`app/revisao/page.tsx`. O alias `@/*` aponta para `src/`.
+`app/revisao/page.tsx`, `app/painel/page.tsx`. O alias `@/*` aponta para `src/`.
 
-## Fases 4 (dashboard) e 5
+## Fase 4 — como o painel soma
+
+`GET /dashboard/summary` (`app/api/v1/dashboard.py`) e a tela `/painel`. **Soma de
+dinheiro passa por `app/services/dashboard.py`** e por nenhum outro lugar: o
+frontend só formata, e a única conta que faz é a proporção de cada barra.
+
+O que é fácil de quebrar sem saber:
+
+- **A soma é por `kind`, com sinal — nunca pelo sinal do valor.** Estorno
+  categorizado como despesa é `EXPENSE` positivo e *abate* o gasto. Separar
+  "entradas" e "saídas" pelo sinal o contaria como receita.
+- **`TRANSFER` fica fora de `net`**, e vem à parte com `inflow`/`outflow`.
+- **Linha sem decisão entra no total e é declarada.** `PENDING`, `NEEDS_REVIEW` e
+  `FAILED` têm `kind` provisório — o do sinal, ou o palpite que pediu revisão.
+  Tirá-las esconderia gasto real (invariante 4); por isso cada total traz
+  `undecided_total` *dentro* dele, e a tela diz quanto do número é palpite.
+- **Só BRL entra nos totais.** Linha em outra moeda é contada em
+  `other_currency_count` e não aparece nos contadores de pendência — a tela diz
+  que as pendentes "já estão nos totais", e a em dólar não está.
+- **`summarize` é pura, `load_summary` consulta.** A aritmética está coberta em
+  `tests/test_dashboard_pure.py`; o período, o filtro de conta e o RLS, em
+  `tests/test_api_dashboard.py`.
+- **Não há índice com `kind`, e não precisa.** Com 50 mil linhas por tenant
+  (sintéticas), a consulta de um mês usa `ix_transactions_tenant_date` e roda em
+  menos de 1 ms. Reavaliar só se a medição com o volume real disser outra coisa.
+- **O filtro por categoria é o drill-down.** Cada categoria abre `/transacoes` com
+  `category_id`, período e `kind` — o mesmo recorte do número clicado, na tela
+  onde a linha se corrige.
+
+## Fase 5
 
 Contexto acumulado em [`docs/fases-3-5.md`](docs/fases-3-5.md): o que já está
-decidido e o que segue em aberto no frontend e na LGPD. **Nada disso está
-implementado** — leia antes de projetar algo que já tem decisão tomada, mas não
-comece uma fase seguinte sem o usuário pedir.
+decidido e o que segue em aberto na LGPD. **Nada disso está implementado** — leia
+antes de projetar algo que já tem decisão tomada, mas não comece a fase sem o
+usuário pedir.
 
-Dois destaques, porque são fáceis de errar sem ler:
-
-- a **tela de revisão** é a mais importante da Fase 4, e não por UX: é ela que
-  produz `category_source = 'MANUAL'`, que é a única régua para medir o acerto do
-  LLM. Precisa permitir ajustar o `kind`, não só a categoria;
-- **não existe autenticação**; `X-Tenant-Id` é confiado cegamente e só há recusa
-  quando `ENVIRONMENT=production`.
+Um destaque, porque é fácil de errar sem ler: **não existe autenticação**;
+`X-Tenant-Id` é confiado cegamente e só há recusa quando
+`ENVIRONMENT=production`. O que segura isso hoje é o acesso só local — ver a
+invariante 6.
 
 ## Fora de escopo no MVP
 

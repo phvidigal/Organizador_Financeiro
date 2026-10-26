@@ -13,8 +13,15 @@ que `docs/pluggy-api.md` marca como não confirmadas:
 Não escreve nada no banco e não devolve segredo: da resposta de `/auth` saem
 apenas os *nomes* dos campos, porque um dos valores é a própria chave.
 
-Some quando a validação terminar — ou fica, guardado pelo bloqueio de produção,
-como ferramenta de depuração de connector novo.
+**Desligado por padrão** (`ENABLE_PLUGGY_DIAGNOSTICS=false` → 404). Liga-se para
+depurar um connector novo e desliga-se em seguida. O bloqueio antigo era só
+"fora de produção" — e o compose sempre roda em desenvolvimento, então o endpoint
+ficava aberto o tempo todo.
+
+**E sem dado pessoal, mesmo ligado.** A resposta crua de `/accounts` traz o CPF
+(`taxNumber`) e o nome (`owner`) do titular, e a de transações traz `paymentData`
+de terceiros. O dump passa pelos mesmos filtros da gravação: o que o banco não
+guarda, a tela também não mostra.
 """
 
 import logging
@@ -28,21 +35,47 @@ from app.api.deps import get_pluggy_client
 from app.core.config import Settings, get_settings
 from app.services.pluggy.client import _loads
 from app.services.pluggy.errors import PluggyError
-from app.services.pluggy.mappers import jsonable, map_account, map_item, map_transaction
+from app.services.pluggy.mappers import (
+    jsonable,
+    map_account,
+    map_item,
+    map_transaction,
+    minimize_raw_payload,
+)
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/pluggy", tags=["pluggy-diagnostics"])
+
+def _require_enabled(settings: Settings = Depends(get_settings)) -> None:
+    """404, e não 403: desligado, o endpoint não existe para quem pergunta."""
+    if not settings.enable_pluggy_diagnostics:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+
+# Dependência do router, e não do handler: o FastAPI a resolve antes das do
+# endpoint. Sem isso, `get_pluggy_client` responderia 503 por falta de credencial
+# antes de o 404 ter chance — e anunciaria que o endpoint existe.
+router = APIRouter(
+    prefix="/pluggy",
+    tags=["pluggy-diagnostics"],
+    dependencies=[Depends(_require_enabled)],
+)
+
+# Campos de `/accounts` que identificam o titular. Os mesmos que `map_account` não
+# copia para o banco.
+_ACCOUNT_PERSONAL_FIELDS = frozenset({"taxNumber", "owner"})
+# `clientUserId` é o identificador que quem criou o item escolheu — no Meu Pluggy,
+# pode ser o e-mail ou o CPF.
+_ITEM_PERSONAL_FIELDS = frozenset({"clientUserId"})
+
+
+def _without(payload: dict[str, Any], fields: frozenset[str]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key not in fields}
 
 # UUIDs de fachada: o diagnóstico não grava nada, mas os mapeadores pedem os
 # identificadores para montar a linha que *seria* gravada.
 _FAKE_TENANT = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _FAKE_CONNECTION = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
-
-
-def _require_non_production(settings: Settings) -> None:
-    if settings.environment == "production":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
 
 async def _probe_auth(settings: Settings) -> dict[str, Any]:
@@ -85,9 +118,7 @@ async def diagnostics(
     settings: Settings = Depends(get_settings),
     client=Depends(get_pluggy_client),
 ) -> dict[str, Any]:
-    """Dump cru da Pluggy para o item informado, sem tocar no banco."""
-    _require_non_production(settings)
-
+    """Dump da Pluggy para o item informado, sem tocar no banco e sem dado pessoal."""
     result: dict[str, Any] = {"item_id": str(item_id), "auth": await _probe_auth(settings)}
 
     # (ii) O tier gratuito deixa disparar atualização de item?
@@ -108,11 +139,13 @@ async def diagnostics(
         result["erro"] = f"{type(exc).__name__}: {exc}"
         return result
 
-    result["item"] = jsonable(item)
+    result["item"] = jsonable(_without(item, _ITEM_PERSONAL_FIELDS))
     result["item_interpretado"] = jsonable(map_item(item))
 
     accounts = await client.list_accounts(item_id)
-    result["accounts"] = jsonable(accounts)
+    result["accounts"] = [
+        jsonable(_without(account, _ACCOUNT_PERSONAL_FIELDS)) for account in accounts
+    ]
 
     contas: list[dict[str, Any]] = []
     for account in accounts:
@@ -126,33 +159,42 @@ async def diagnostics(
         except ValueError as exc:
             entrada["interpretado"] = f"não mapeável: {exc}"
 
-        # (iii) Sinal do cartão: `bruto` é o que a Pluggy mandou, `gravaria` é o que
-        # a normalização produziria. Uma compra conhecida do cartão resolve a dúvida.
+        # (iii) Sinal do cartão: `bruto` é o que a Pluggy mandou (sem dado pessoal,
+        # mas com `amount` e `type` intactos), `gravaria` é o que a normalização
+        # produziria. Uma compra conhecida do cartão resolve a dúvida.
         amostra = []
         account_id = uuid.UUID(str(account["id"]))
-        async for page in client.iter_transactions(account_id):
-            for tx in page[:3]:
-                row = map_transaction(
-                    tx,
-                    tenant_id=_FAKE_TENANT,
-                    account_id=account_id,
-                    account_type=account.get("type"),
-                )
-                amostra.append(
-                    {
-                        "bruto": jsonable(tx),
-                        "gravaria": {
-                            "amount": str(row["amount"]),
-                            "date": row["date"].isoformat(),
-                            "posted_at": row["posted_at"].isoformat()
-                            if row["posted_at"]
-                            else None,
-                            "pluggy_category_id": row["pluggy_category_id"],
-                            "pluggy_category_name": row["pluggy_category_name"],
-                        },
-                    }
-                )
-            break  # só a primeira página; isto é diagnóstico, não sync
+        # Só a primeira página — isto é diagnóstico, não sync. `aclose` explícito
+        # porque abandonar um gerador assíncrono no meio deixa a resposta HTTP dele
+        # aberta até o coletor de lixo passar.
+        pages = client.iter_transactions(account_id)
+        try:
+            page = await anext(pages, [])
+        finally:
+            await pages.aclose()
+        for tx in page[:3]:
+            row = map_transaction(
+                tx,
+                tenant_id=_FAKE_TENANT,
+                account_id=account_id,
+                account_type=account.get("type"),
+            )
+            amostra.append(
+                {
+                    # O que seria gravado em `raw_payload`, não a resposta
+                    # inteira: `paymentData` traz nome e CPF de terceiros.
+                    "bruto": minimize_raw_payload(tx),
+                    "gravaria": {
+                        "amount": str(row["amount"]),
+                        "date": row["date"].isoformat(),
+                        "posted_at": row["posted_at"].isoformat()
+                        if row["posted_at"]
+                        else None,
+                        "pluggy_category_id": row["pluggy_category_id"],
+                        "pluggy_category_name": row["pluggy_category_name"],
+                    },
+                }
+            )
         entrada["transacoes"] = amostra
         contas.append(entrada)
 

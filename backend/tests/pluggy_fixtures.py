@@ -149,6 +149,54 @@ TRANSACTIONS_PAGE_2_JSON = """
 }
 """
 
+# Uma transação com tudo o que **não** pode chegar ao banco: `paymentData` com nome,
+# CPF/CNPJ, agência e conta das duas pontas, o número do cartão e um campo que a
+# Pluggy passasse a mandar amanhã. Dados fictícios, como o resto deste módulo.
+TRANSACTION_WITH_PERSONAL_DATA_JSON = """
+{
+  "id": "ccccccc1-0000-0000-0000-000000000001",
+  "accountId": "22222222-2222-2222-2222-222222222222",
+  "description": "PIX RECEBIDO",
+  "descriptionRaw": "PIX RECEBIDO FULANO DE TAL",
+  "amount": 850.00,
+  "type": "CREDIT",
+  "date": "2026-08-05T00:00:00.000Z",
+  "status": "POSTED",
+  "category": "Transfer - PIX",
+  "categoryId": "05070000",
+  "currencyCode": "BRL",
+  "operationType": "PIX",
+  "paymentData": {
+    "paymentMethod": "PIX",
+    "reason": "aluguel do apto 12",
+    "referenceNumber": "E000000002026080500000000000001",
+    "payer": {
+      "name": "Fulano de Tal",
+      "branchNumber": "0001",
+      "accountNumber": "12345-6",
+      "routingNumber": "260",
+      "documentNumber": {"type": "CPF", "value": "123.456.789-00"}
+    },
+    "receiver": {
+      "name": "Ciclano Beltrano",
+      "branchNumber": "0002",
+      "accountNumber": "65432-1",
+      "documentNumber": {"type": "CPF", "value": "987.654.321-00"}
+    },
+    "boletoMetadata": {"digitableLine": "23790000000000000000000000000000000000000000000"}
+  },
+  "creditCardMetadata": {
+    "cardNumber": "4321",
+    "installmentNumber": 2,
+    "totalInstallments": 10,
+    "totalAmount": 8500.00,
+    "payeeMCC": 6513
+  },
+  "novoCampoDaPluggy": {"qualquer": "coisa"},
+  "createdAt": "2026-08-05T10:00:00.000Z"
+}
+"""
+
 # Cartão de crédito: é aqui que a suspeita de inversão de sinal se resolve.
 TRANSACTIONS_CREDIT_JSON = """
 {

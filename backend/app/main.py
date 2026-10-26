@@ -6,12 +6,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.deps import close_ollama_client, close_pluggy_client
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.db import engine
 from app.core.rls_guard import assert_rls_enforced
+from app.core.security import OriginCheckMiddleware
 from app.services.categorization.runner import shutdown_categorization_tasks
 from app.services.pluggy.runner import shutdown_sync_tasks
 
@@ -50,6 +52,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # A última registrada é a mais externa. Ordem de execução, portanto: Host,
+    # CORS, Origin. O Host vem primeiro para que um request de DNS rebinding não
+    # chegue nem ao CORS. Ver `app/core/security.py`.
+    app.add_middleware(OriginCheckMiddleware, allowed_origins=settings.cors_origins)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -57,6 +63,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
 
     app.include_router(api_router)
     return app

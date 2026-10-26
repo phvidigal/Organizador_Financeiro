@@ -99,8 +99,8 @@ export default async function Home() {
       </div>
 
       <p className="next-steps">
-        Fase 4 em andamento: a <Link href="/revisao">fila de revisão</Link> já
-        responde às perguntas do modelo. O dashboard é o próximo passo.
+        Fase 4: o <Link href="/painel">painel</Link> soma o mês por natureza, e a{" "}
+        <Link href="/revisao">fila de revisão</Link> responde às perguntas do modelo.
       </p>
     </main>
   );

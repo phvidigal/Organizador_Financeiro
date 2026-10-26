@@ -94,7 +94,8 @@ main.wide {
 
 .nav {
   display: flex;
-  gap: 1rem;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
   margin-bottom: 2rem;
   font-size: 0.9rem;
 }
@@ -301,4 +302,133 @@ select:disabled {
 /* O seletor é a coluna mais larga da tabela; sem isto ela espreme a descrição. */
 .picker select[aria-label="Categoria"] {
   min-width: 12rem;
+}
+
+/* --- Fase 4: painel ---------------------------------------------------------
+   As barras são `div` com largura em porcentagem, e não biblioteca de gráfico:
+   é uma proporção por linha, e a tabela já é o gráfico. */
+
+.month {
+  min-width: 10rem;
+  text-align: center;
+}
+
+.chip-active {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.cards .card {
+  margin-bottom: 0;
+}
+
+.cards .muted {
+  margin: 0.25rem 0 0;
+}
+
+.kpi {
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.notice {
+  border-left: 3px solid var(--border);
+  padding: 0.25rem 0 0.25rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+h2.section {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 2rem 0 0;
+}
+
+/* Layout fixo para as colunas de "Para onde foi" e "De onde veio" alinharem entre
+   as duas tabelas; as larguras saem da primeira linha. */
+.breakdown {
+  table-layout: fixed;
+}
+
+.breakdown td:nth-child(1) {
+  width: 42%;
+}
+
+.breakdown td:nth-child(3) {
+  width: 10%;
+}
+
+.breakdown td:nth-child(4) {
+  width: 18%;
+}
+
+.breakdown tr.root td {
+  font-weight: 600;
+}
+
+.breakdown tr.child td {
+  border-bottom-style: dashed;
+}
+
+.breakdown tr.child td:first-child {
+  padding-left: 1.5rem;
+}
+
+.breakdown a {
+  color: inherit;
+}
+
+.bar-cell {
+  width: 35%;
+  vertical-align: middle;
+}
+
+.bar-track {
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.bar-expense {
+  background: var(--fail);
+}
+
+.bar-income {
+  background: var(--ok);
+}
+
+/* No celular a barra não cabe ao lado do rótulo: a porcentagem diz o mesmo. */
+@media (max-width: 40rem) {
+  .breakdown {
+    table-layout: auto;
+  }
+
+  .breakdown td:nth-child(1) {
+    width: auto;
+  }
+
+  .bar-cell {
+    display: none;
+  }
+}
+
+details summary {
+  cursor: pointer;
+  margin-top: 0.5rem;
 }

@@ -137,6 +137,57 @@ export type CategorizationStatusRead = {
   queue: QueueCounts;
 };
 
+// --- Dashboard ---------------------------------------------------------------
+// Espelha `app/schemas/dashboard.py`. Os totais vêm prontos do backend, com sinal:
+// despesa é negativa, e um estorno categorizado como despesa a abate.
+
+export type KindTotal = {
+  total: Money;
+  inflow: Money;
+  outflow: Money;
+  count: number;
+  // A parte de `total` que ainda espera decisão — está dentro dele, não fora.
+  undecided_total: Money;
+  undecided_count: number;
+};
+
+export type CategoryTotal = {
+  // NULL no balde "Sem categoria".
+  category_id: string | null;
+  label: string;
+  name: string;
+  total: Money;
+  count: number;
+  undecided_count: number;
+};
+
+export type RootTotal = {
+  // NULL em "Sem categoria" e "Categoria inativa", que não são raiz de nada.
+  root_id: string | null;
+  label: string;
+  total: Money;
+  count: number;
+  undecided_count: number;
+  children: CategoryTotal[];
+};
+
+export type DashboardSummary = {
+  date_from: string;
+  date_to: string;
+  account_id: string | null;
+  currency_code: string;
+  income: KindTotal;
+  expense: KindTotal;
+  transfer: KindTotal;
+  net: Money;
+  income_by_category: RootTotal[];
+  expense_by_category: RootTotal[];
+  transfer_by_category: RootTotal[];
+  undecided: { pending: number; needs_review: number; failed: number };
+  other_currency_count: number;
+  latest_date: string | null;
+};
+
 export type Page<T> = {
   items: T[];
   total: number;

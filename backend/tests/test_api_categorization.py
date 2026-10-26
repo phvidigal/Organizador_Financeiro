@@ -49,7 +49,7 @@ def api(app_tenant_session, monkeypatch):
             monkeypatch.setattr(runner, "schedule_categorization", lambda **kwargs: False)
             monkeypatch.setattr(runner, "is_running", lambda _: True)
 
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost")
 
     build.scheduled = scheduled
     return build

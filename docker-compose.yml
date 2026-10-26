@@ -10,7 +10,11 @@ services:
       APP_DB_USER: ${APP_DB_USER:-app_user}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:-app_user}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Só no loopback, como as outras duas portas: sem o `127.0.0.1:` o Docker
+      # publica em todas as interfaces, e qualquer aparelho da rede local entraria
+      # no Postgres como superusuário. Um cliente SQL no próprio host continua
+      # funcionando. Abrir para a rede exige autenticação antes (ver CLAUDE.md).
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Cria o role app_user no primeiro boot (ver o cabeçalho do script).
@@ -42,7 +46,7 @@ services:
       TEST_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-finance}_test
       TEST_APP_DATABASE_URL: postgresql+asyncpg://${APP_DB_USER:-app_user}:${APP_DB_PASSWORD:-app_user}@db:5432/${POSTGRES_DB:-finance}_test
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
     extra_hosts:
@@ -70,7 +74,7 @@ services:
       INTERNAL_API_URL: http://backend:8000
       WATCHPACK_POLLING: "true"  # hot reload através de bind mount vindo do Windows
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./frontend:/app
       # Volume anônimo: sem ele o bind mount do host (que não tem node_modules)
