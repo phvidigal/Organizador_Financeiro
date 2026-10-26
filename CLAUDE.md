@@ -85,8 +85,9 @@ senão ela escapa do teste de isolamento.
 
 ### 3. Dinheiro é `NUMERIC(18,2)`, nunca float
 
-Sinal normalizado na ingestão: negativo = saída, sempre. A resposta crua da
-origem fica em `raw_payload`.
+Sinal normalizado na ingestão: negativo = saída, sempre. A resposta da origem
+fica em `raw_payload` — minimizada, sem dado pessoal de terceiros (ver
+"Segurança").
 
 ### 4. `kind` é separado de categoria
 
@@ -111,6 +112,31 @@ divergiram — corrija e **apague o arquivo gerado**.
 Declarou `default=` num modelo? Declare `server_default=` junto, senão o
 autogenerate propõe dropar o default do banco e todo `INSERT` em SQL cru passa a
 violar `NOT NULL`.
+
+### 6. Segurança — o app não tem login, e estas camadas são o que o substitui
+
+Quem alcança a API lê e altera o extrato inteiro. Enquanto não houver
+autenticação, quatro regras mantêm esse "quem" restrito ao titular, na própria
+máquina — e quebrar qualquer uma delas abre o extrato sem erro nenhum:
+
+- **Porta só em `127.0.0.1`** (`docker-compose.yml`). Sem o prefixo, o Docker
+  publica em todas as interfaces e o Wi-Fi inteiro entra — no Postgres, como
+  superusuário.
+- **`Host` local** (`TrustedHostMiddleware` no backend com `Settings.allowed_hosts`;
+  `frontend/src/middleware.ts` no Next). É o que barra DNS rebinding.
+  `Settings._hosts_are_local` **recusa subir** com host de fora da máquina: abrir
+  o app para a rede passa obrigatoriamente por implementar login antes. Não
+  afrouxe a trava sem trazer a autenticação junto.
+- **Escrita de outra origem é recusada** (`app/core/security.py`). O CORS esconde
+  a resposta, mas não impede a execução de um POST simples.
+- **`raw_payload` por lista de permissão** (`mappers.RAW_TRANSACTION_FIELDS`). O
+  que a Pluggy manda em `paymentData` — nome, CPF/CNPJ, agência e conta de quem
+  pagou ou recebeu — não chega ao banco. Campo novo só entra por decisão
+  explícita, nunca por ter aparecido na resposta. A migration `0006` limpou o
+  histórico com uma cópia congelada da lista; não a edite junto.
+
+Testes: `tests/test_api_security.py`, `tests/test_config.py`,
+`tests/test_pluggy_mappers.py` e `tests/test_migrations.py`.
 
 ---
 
@@ -208,8 +234,10 @@ O sync **lê, não atualiza**: `PATCH /items` é recusado no tier pessoal
 ### Endpoint temporário
 
 `GET /pluggy/diagnostics` (`app/api/v1/pluggy_diagnostics.py`) despeja a resposta
-crua da Pluggy ao lado do que seria gravado. Foi escrito para a validação da Fase
-2 e continua útil para depurar connector novo. Bloqueado em produção; nunca
+da Pluggy ao lado do que seria gravado. Foi escrito para a validação da Fase 2 e
+continua útil para depurar connector novo. **Desligado por padrão**: responde 404
+até `ENABLE_PLUGGY_DIAGNOSTICS=true`. Mesmo ligado, passa pelos filtros da
+gravação — sem `taxNumber`, `owner` nem `paymentData` de terceiros — e nunca
 devolve valor de segredo, só nomes de campo.
 
 ### Limitações conhecidas
@@ -385,7 +413,8 @@ usuário pedir.
 
 Um destaque, porque é fácil de errar sem ler: **não existe autenticação**;
 `X-Tenant-Id` é confiado cegamente e só há recusa quando
-`ENVIRONMENT=production`.
+`ENVIRONMENT=production`. O que segura isso hoje é o acesso só local — ver a
+invariante 6.
 
 ## Fora de escopo no MVP
 

@@ -80,3 +80,59 @@ só foi visto com dados sintéticos:
    confirma que não há índice a criar.
 
 O que divergir no passo 2 é o que precisa voltar para a próxima sessão.
+
+## 4. Ajustes de segurança
+
+**Quando:** junto com os itens 1 e 3 — também no PR #3. Este comando cobre os
+dois; feito ele, o `up` do item 1 e o `restart` do item 3 são dispensáveis.
+
+```bash
+git checkout master && git pull
+docker compose up -d --build --renew-anon-volumes
+docker compose exec backend alembic upgrade head
+```
+
+- O `--build` reconstrói o backend (FastAPI, Starlette e cryptography subiram de
+  versão) e o frontend (Next 15.5.28), e recria os três containers com as portas
+  novas, presas em `127.0.0.1`. O `--renew-anon-volumes` é o do item 1; o banco
+  usa volume nomeado (`pgdata`) e não é tocado.
+- A migration `0006` tira nome, CPF/CNPJ e conta de terceiros do `raw_payload` já
+  gravado. É **irreversível**, de propósito.
+
+**Conferir que nada mais escuta na rede** (PowerShell ou cmd):
+
+```bash
+netstat -ano | findstr ":3000 :8000 :5432 :11434"
+```
+
+Toda linha `LISTENING` tem de mostrar `127.0.0.1`. Se a do `11434` (Ollama)
+mostrar `0.0.0.0`, ele está aberto para a rede: é configuração do Ollama no
+Windows (`OLLAMA_HOST`), fora deste repositório, e o container o alcança por
+`host.docker.internal` mesmo sem isso — confirme com `GET /health/ollama` depois
+de fechar.
+
+**Recomendado — trocar as senhas do banco.** As portas já não saem da máquina,
+mas o `postgres` é superusuário e qualquer processo local o alcança. O volume já
+existe, então trocar no `.env` não basta:
+
+```bash
+docker compose exec db psql -U postgres -c "ALTER ROLE postgres PASSWORD 'nova-senha-forte'"
+docker compose exec db psql -U postgres -c "ALTER ROLE app_user PASSWORD 'outra-senha-forte'"
+```
+
+Depois, as mesmas senhas no `.env` (`POSTGRES_PASSWORD`, `APP_DB_PASSWORD` e a
+dentro de `DATABASE_URL`) e `docker compose up -d --force-recreate backend`.
+
+**Opcional — tirar o dado antigo do disco.** O `UPDATE` da migration deixa as
+versões antigas das linhas no arquivo do Postgres até serem reaproveitadas:
+
+```bash
+docker compose exec db psql -U postgres -d finance -c "VACUUM FULL transactions"
+```
+
+Trava a tabela por alguns segundos; com o app parado, é imperceptível.
+
+**Fora do código:** o repositório no GitHub é **público**. Não há segredo nem
+valor nele, mas os docs descrevem o perfil do extrato real (quantidade de
+lançamentos, parcelas vindas de pessoa jurídica, aplicações em renda variável).
+Torná-lo privado é Settings → General → Danger Zone → Change visibility.

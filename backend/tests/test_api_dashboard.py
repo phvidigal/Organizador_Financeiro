@@ -46,7 +46,7 @@ def api(app_tenant_session):
 
         app.dependency_overrides[get_tenant_session] = override_session
         app.dependency_overrides[resolve_tenant_id] = lambda: tenant_id
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost")
 
     return build
 

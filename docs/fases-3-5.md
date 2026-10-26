@@ -386,7 +386,26 @@ já tem `users` com `hashed_password`, sem nada implementado em cima.
 
 ---
 
-## Fase 5 — LGPD e segurança · ⚠️ não implementada
+## Fase 5 — LGPD e segurança · ⚠️ não implementada (com uma antecipação)
+
+### 🛠️ Antecipado: minimização e acesso só local
+
+Uma revisão de segurança (out/2026) adiantou duas peças, porque eram vazamento e
+não plano:
+
+- **`raw_payload` deixou de guardar dado de terceiros.** A resposta da Pluggy traz
+  em `paymentData` nome, CPF/CNPJ, agência e conta de quem mandou e recebeu cada
+  Pix — gente que nunca consentiu com nada aqui. A gravação passou a ser por
+  lista de permissão (`mappers.RAW_TRANSACTION_FIELDS`), e a migration `0006`
+  limpou o histórico. Sobra o **tipo** de documento (CPF ou CNPJ), que é sinal de
+  categorização e não identifica ninguém.
+- **Limite que fica:** `description_raw` costuma trazer o nome do remetente
+  ("PIX RECEBIDO FULANO"). É o insumo do LLM e não tem como sair sem perder a
+  categorização. Se a Fase 5 criptografar algo, é por aqui que começa.
+- **Acesso só local, por construção.** Portas em `127.0.0.1`, `Host` validado no
+  backend e no Next, escrita de outra origem recusada, e o backend se recusa a
+  subir com host de rede configurado. Autenticação continua ⚠️ — e passa a ser
+  pré-requisito explícito para qualquer acesso de fora da máquina.
 
 ### O que realmente precisa de criptografia
 
@@ -399,8 +418,10 @@ existe de sensível aqui é menos do que o brief sugere:
 - tokens da Pluggy, **se** forem cacheados em banco (a API key dura ~2h; cachear
   em memória evita o problema por completo);
 - `taxNumber` e `owner` (CPF e nome do titular), que hoje são **deliberadamente
-  não persistidos**. Se a Fase 4 precisar deles, é aí que a criptografia em
-  repouso passa a ter objeto.
+  não persistidos** — e, desde a revisão de out/2026, também não aparecem no
+  `GET /pluggy/diagnostics`, que os despejava crus. Se a Fase 4 precisar deles, é
+  aí que a criptografia em repouso passa a ter objeto;
+- `description_raw`, que carrega nome de terceiros em Pix e TED (ver acima).
 
 Conclusão provável: a Fase 5 é mais sobre consentimento, retenção e exclusão do
 que sobre criptografia.

@@ -3,7 +3,11 @@
 # o código vem do bind mount em /app. Instalar via `pip install .` criaria uma
 # segunda cópia em site-packages e o --reload passaria a editar o arquivo errado.
 
-fastapi==0.115.6
+fastapi==0.143.0
+# Fixada à parte, e não deixada para o FastAPI resolver: as versões que ele puxava
+# (0.41.x) tinham CVEs de URL montada a partir do `Host` e de path sem `/`
+# (pip-audit, out/2026). A partir do FastAPI 0.13x não há teto de versão.
+starlette==1.7.0
 uvicorn[standard]==0.34.0
 
 # SQLAlchemy 2.0 (estilo declarativo novo, com Mapped/mapped_column).
@@ -15,5 +19,5 @@ alembic==1.14.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
 
-cryptography==44.0.0      # Fernet — criptografia em repouso (Fase 5)
+cryptography==50.0.2      # Fernet — criptografia em repouso (Fase 5)
 httpx==0.28.1             # cliente HTTP (Pluggy na Fase 2, Ollama na Fase 3)

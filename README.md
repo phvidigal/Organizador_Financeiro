@@ -86,6 +86,18 @@ owner numa depuração e esquecer de voltar é o cenário realista; um container
 não sobe custa dez minutos, isolamento desligado em silêncio pode levar meses
 para ser notado.
 
+**Só local, porque não há login.** Sem autenticação, quem alcança a API lê o
+extrato inteiro. As portas escutam só em `127.0.0.1`; o backend e o Next recusam
+`Host` que não seja a própria máquina, o que barra DNS rebinding; escrita vinda de
+outra origem é recusada, o que barra CSRF. E o backend se recusa a subir se
+alguém configurar um host de rede — abrir o app para o celular passa,
+obrigatoriamente, por implementar login antes.
+
+**Sem dado pessoal de terceiros.** A resposta da Pluggy traz nome, CPF/CNPJ e
+conta de quem mandou e recebeu cada Pix. `raw_payload` guarda a transação por
+lista de permissão, e isso não entra: o que a origem acrescentar amanhã fica de
+fora até alguém decidir o contrário.
+
 **Valores em `NUMERIC(18,2)`.** Nunca float. Ponto flutuante binário não
 representa `0,10` exatamente e o erro acumula em soma de extrato.
 

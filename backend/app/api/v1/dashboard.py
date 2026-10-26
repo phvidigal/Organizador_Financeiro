@@ -30,7 +30,7 @@ async def get_summary(
     """
     if date_from > date_to:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "date_from posterior a date_to"
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "date_from posterior a date_to"
         )
 
     summary = await load_summary(

@@ -53,7 +53,7 @@ def api(app_tenant_session, monkeypatch):
             monkeypatch.setattr(runner, "is_running", lambda _: True)
 
         return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost"
         )
 
     return build
@@ -392,7 +392,7 @@ async def test_missing_credentials_are_a_503_not_a_crash(app_tenant_session, mon
     app.dependency_overrides[resolve_tenant_id] = lambda: TENANT_A
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost"
     ) as client:
         response = await client.post("/connections", json={"item_id": str(ITEM_ID)})
 
