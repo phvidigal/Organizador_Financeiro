@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.text import fold
@@ -117,8 +117,10 @@ def suggest_pattern(description: str) -> str | None:
 async def load_active_rules(session: AsyncSession) -> list[Rule]:
     """Regras ativas do tenant corrente, já na ordem de avaliação.
 
-    O escopo vem do RLS. Menor `priority` primeiro; empate pela mais antiga, que é o
-    que o modelo de `category_rules` documenta.
+    O escopo vem do RLS. Menor `priority` primeiro; no empate, o **trecho mais
+    longo** — o mais específico — antes, e só então a mais antiga. Sem o critério do
+    comprimento, quem criou "IFOOD → Delivery" e depois "IFOOD MERCADO →
+    Supermercado" veria a segunda regra nunca disparar.
     """
     result = await session.execute(
         select(
@@ -133,7 +135,11 @@ async def load_active_rules(session: AsyncSession) -> list[Rule]:
             CategoryRule.match_type.in_(SUPPORTED_MATCH_TYPES),
             CategoryRule.pattern.is_not(None),
         )
-        .order_by(CategoryRule.priority, CategoryRule.created_at)
+        .order_by(
+            CategoryRule.priority,
+            func.length(CategoryRule.pattern).desc(),
+            CategoryRule.created_at,
+        )
     )
     return [
         Rule(id=row.id, match_type=row.match_type, pattern=row.pattern, category_id=row.category_id)
