@@ -27,7 +27,12 @@ from app.services.ingestion import upsert_external_transactions
 from app.services.pluggy.category_map import CategoryMapReport, sync_category_map
 from app.services.pluggy.client import PluggyClient
 from app.services.pluggy.errors import PluggyError
-from app.services.pluggy.mappers import map_account, map_item, map_transaction
+from app.services.pluggy.mappers import (
+    holder_identity,
+    map_account,
+    map_item,
+    map_transaction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +197,15 @@ async def sync_connection(
         # --- 5. Contas -----------------------------------------------------------
         phase = "GET /accounts"
         accounts = await client.list_accounts(item_id)
+        # CPF e nome do titular, em memória e só até o fim desta execução: é com eles
+        # que cada transação descobre se o outro lado é o próprio titular. Nada disto
+        # é gravado — ver `mappers.counterparty_is_holder`.
+        holder = holder_identity(accounts)
+        if not holder.known:
+            outcome.warnings.append(
+                "contas sem CPF/nome do titular; transferência entre contas próprias "
+                "não será reconhecida automaticamente"
+            )
         account_rows = []
         for account in accounts:
             try:
@@ -223,6 +237,7 @@ async def sync_connection(
                         tenant_id=tenant_id,
                         account_id=account_id,
                         account_type=account_type,
+                        holder=holder,
                     )
                     for tx in page
                 ]

@@ -49,7 +49,11 @@ def bank_rows() -> list[dict]:
     payload2 = _loads(TRANSACTIONS_PAGE_2_JSON.encode())
     return [
         map_transaction(
-            tx, tenant_id=TENANT, account_id=BANK_ACCOUNT_ID, account_type=AccountType.BANK
+            tx,
+            tenant_id=TENANT,
+            account_id=BANK_ACCOUNT_ID,
+            account_type=AccountType.BANK,
+            holder=None,
         )
         for tx in [*payload["results"], *payload2["results"]]
     ]
@@ -144,6 +148,7 @@ def test_credit_account_follows_the_same_convention_by_default() -> None:
         tenant_id=TENANT,
         account_id=CREDIT_ACCOUNT_ID,
         account_type=AccountType.CREDIT,
+        holder=None,
     )
     assert row["amount"] == Decimal("-89.90")
 
@@ -211,7 +216,11 @@ def test_long_category_name_is_truncated_to_the_column() -> None:
         "categoryId": "I" * 60,
     }
     row = map_transaction(
-        tx, tenant_id=TENANT, account_id=BANK_ACCOUNT_ID, account_type=AccountType.BANK
+        tx,
+        tenant_id=TENANT,
+        account_id=BANK_ACCOUNT_ID,
+        account_type=AccountType.BANK,
+        holder=None,
     )
     assert len(row["pluggy_category_name"]) == 120
     assert len(row["pluggy_category_id"]) == 32
@@ -333,6 +342,7 @@ def personal_data_row() -> dict:
         tenant_id=TENANT,
         account_id=BANK_ACCOUNT_ID,
         account_type=AccountType.BANK.value,
+        holder=None,
     )
 
 
@@ -389,3 +399,105 @@ def test_minimize_tolerates_malformed_payment_data() -> None:
     )
 
     assert raw == {"id": "x", "paymentData": {}}
+
+
+# --- Contraparte: o outro lado é o próprio titular? --------------------------
+
+
+def holder() -> mappers.HolderIdentity:
+    return mappers.holder_identity(_loads(ACCOUNTS_JSON.encode())["results"])
+
+
+def pix(direction: str, party: dict | None) -> dict:
+    tx: dict = {"id": "p", "amount": Decimal("100.00"), "type": direction}
+    if party is not None:
+        side = "receiver" if direction == "DEBIT" else "payer"
+        tx["paymentData"] = {"paymentMethod": "PIX", side: party}
+    return tx
+
+
+def test_holder_identity_reads_document_and_name_from_accounts() -> None:
+    identity = holder()
+
+    # As duas contas da fixture são do mesmo titular: um documento, um nome.
+    assert identity.documents == frozenset({"12345678900"})
+    assert identity.names == frozenset({"FULANO DE TAL"})
+
+
+def test_holder_identity_repr_hides_the_values() -> None:
+    """Um traceback com a instância no escopo não pode levar o CPF para o log."""
+    text_ = repr(holder())
+
+    assert "12345678900" not in text_
+    assert "FULANO" not in text_
+    assert text_ == "HolderIdentity(documents=1, names=1)"
+
+
+def test_incoming_pix_from_the_holder_document_is_own_transfer() -> None:
+    row = map_transaction(
+        _loads(TRANSACTION_WITH_PERSONAL_DATA_JSON.encode()),
+        tenant_id=TENANT,
+        account_id=BANK_ACCOUNT_ID,
+        account_type=AccountType.BANK,
+        holder=holder(),
+    )
+
+    # CREDIT: quem importa é quem pagou — e o pagador da fixture é o titular.
+    assert row["counterparty_is_holder"] is True
+
+
+def test_outgoing_pix_looks_at_the_receiver() -> None:
+    """Numa saída, o pagador é sempre o titular; quem decide é quem recebeu."""
+    tx = _loads(TRANSACTION_WITH_PERSONAL_DATA_JSON.encode())
+    tx["type"] = "DEBIT"
+
+    assert mappers.counterparty_is_holder(tx, holder()) is False
+
+
+def test_name_matches_without_accents_or_extra_spaces() -> None:
+    party = {"name": "  fulano   DE tál "}
+
+    assert mappers.counterparty_is_holder(pix("DEBIT", party), holder()) is True
+
+
+def test_document_wins_over_a_different_name() -> None:
+    """O banco do outro lado pode abreviar o nome; o CPF é o mesmo."""
+    party = {"name": "F DE TAL", "documentNumber": {"type": "CPF", "value": "12345678900"}}
+
+    assert mappers.counterparty_is_holder(pix("CREDIT", party), holder()) is True
+
+
+def test_unknown_is_not_no() -> None:
+    """Sem `paymentData`, sem titular, ou ponta vazia: `None`, nunca `False`."""
+    assert mappers.counterparty_is_holder(pix("DEBIT", None), holder()) is None
+    assert mappers.counterparty_is_holder(pix("DEBIT", {"name": "X"}), None) is None
+    assert (
+        mappers.counterparty_is_holder(pix("DEBIT", {"name": "X"}), mappers.HolderIdentity())
+        is None
+    )
+    assert mappers.counterparty_is_holder(pix("DEBIT", {"branchNumber": "1"}), holder()) is None
+
+
+def test_direction_falls_back_to_the_sign_without_type() -> None:
+    tx = {
+        "id": "s",
+        "amount": Decimal("-50.00"),
+        "paymentData": {"receiver": {"name": "Fulano de Tal"}, "payer": {"name": "Outro"}},
+    }
+
+    assert mappers.counterparty_is_holder(tx, holder()) is True
+
+
+def test_the_row_never_carries_the_holder_document() -> None:
+    """O booleano entra; o CPF que o decidiu, não — em coluna nenhuma."""
+    row = map_transaction(
+        _loads(TRANSACTION_WITH_PERSONAL_DATA_JSON.encode()),
+        tenant_id=TENANT,
+        account_id=BANK_ACCOUNT_ID,
+        account_type=AccountType.BANK,
+        holder=holder(),
+    )
+    dumped = json.dumps(row, default=str, ensure_ascii=False)
+
+    for leaked in ("123.456.789-00", "12345678900", "987.654.321-00"):
+        assert leaked not in dumped

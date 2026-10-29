@@ -514,3 +514,83 @@ async def test_unmodelled_account_type_is_skipped_not_fatal(
     assert outcome.status == "SUCCESS"
     assert outcome.accounts_synced == 1
     assert any("INVESTMENT" in w for w in outcome.warnings)
+
+
+# --- Contraparte: o flag que sustenta a conta própria ------------------------
+
+
+def _single_pix_routes(payer_name: str, payer_document: str):
+    """Rotas padrão, com a conta corrente devolvendo um Pix só, do pagador dado."""
+    import json
+
+    from tests.pluggy_fixtures import TRANSACTION_WITH_PERSONAL_DATA_JSON
+
+    tx = json.loads(TRANSACTION_WITH_PERSONAL_DATA_JSON)
+    tx["paymentData"]["payer"]["name"] = payer_name
+    tx["paymentData"]["payer"]["documentNumber"]["value"] = payer_document
+    page = json.dumps({"results": [tx]})
+
+    def transactions(request: httpx.Request) -> str:
+        if request.url.params.get("accountId") == str(CREDIT_ACCOUNT_ID):
+            return TRANSACTIONS_CREDIT_JSON
+        return page
+
+    routes = default_routes()
+    routes[("GET", "/v2/transactions")] = transactions
+    return routes
+
+
+async def _flag(session_scope) -> bool | None:
+    async with session_scope(TENANT_A) as session:
+        return await session.scalar(
+            text(
+                "SELECT counterparty_is_holder FROM transactions "
+                "WHERE external_id = 'ccccccc1-0000-0000-0000-000000000001'"
+            )
+        )
+
+
+async def test_sync_records_whether_the_counterparty_is_the_holder(
+    connection_a, app_tenant_session
+) -> None:
+    """Ponta a ponta: o CPF do pagador é o do titular das contas → `True` no banco.
+    E é fato da origem: se ela corrigir o pagador, o re-sync recalcula."""
+    outcome = await run_sync(
+        connection_a,
+        app_tenant_session,
+        routes=_single_pix_routes("Fulano de Tal", "123.456.789-00"),
+    )
+    assert outcome.status == "SUCCESS", outcome.error
+    assert await _flag(app_tenant_session) is True
+
+    await run_sync(
+        connection_a,
+        app_tenant_session,
+        routes=_single_pix_routes("Ciclano Beltrano", "987.654.321-00"),
+        full=True,
+    )
+    assert await _flag(app_tenant_session) is False
+
+
+async def test_sync_never_stores_the_holder_document(connection_a, app_tenant_session) -> None:
+    """Nem em `raw_payload`, nem em coluna alguma da linha."""
+    await run_sync(
+        connection_a,
+        app_tenant_session,
+        routes=_single_pix_routes("Fulano de Tal", "123.456.789-00"),
+    )
+
+    async with app_tenant_session(TENANT_A) as session:
+        dumped = await session.scalar(
+            text(
+                "SELECT row_to_json(t)::text FROM transactions t "
+                "WHERE external_id = 'ccccccc1-0000-0000-0000-000000000001'"
+            )
+        )
+
+    assert dumped is not None
+    # O nome em caixa mista é o de `paymentData`. Em caixa alta ele continua na
+    # descrição ("PIX RECEBIDO FULANO DE TAL") — o limite conhecido do
+    # `description_raw`, que é o insumo do LLM.
+    for leaked in ("123.456.789-00", "12345678900", "Fulano de Tal"):
+        assert leaked not in dumped

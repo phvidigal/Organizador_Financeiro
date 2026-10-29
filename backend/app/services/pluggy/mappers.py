@@ -10,7 +10,11 @@ As saídas são dicts cujas chaves são nomes de coluna dos modelos SQLAlchemy �
 que `app/services/ingestion.py` e `app/services/accounts.py` consomem.
 """
 
+import re
+import unicodedata
 import uuid
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date as date_type
 from datetime import datetime
 from decimal import Decimal
@@ -57,6 +61,7 @@ TRANSACTION_ROW_KEYS = frozenset(
         "pluggy_category_name",
         "categorization_status",
         "raw_payload",
+        "counterparty_is_holder",
     }
 )
 
@@ -166,6 +171,118 @@ def minimize_raw_payload(tx: dict[str, Any]) -> dict[str, Any]:
         }
 
     return jsonable(raw)
+
+
+# --- O titular, e se o outro lado de um Pix é ele ----------------------------
+#
+# É o que tira a transferência entre contas próprias dos totais **sem palpite**: a
+# Pluggy manda, em `paymentData`, o CPF e o nome de quem pagou e de quem recebeu, e
+# as contas do item trazem o CPF (`taxNumber`) e o nome (`owner`) do titular. Se a
+# ponta do outro lado é ele, o dinheiro não saiu de casa.
+#
+# **A comparação acontece em memória, durante o sync, e só o resultado é gravado**
+# (`transactions.counterparty_is_holder`). O documento de ninguém chega ao banco —
+# nem o do titular, que `map_account` também não copia.
+
+_NON_DIGITS = re.compile(r"\D")
+_SPACES = re.compile(r"\s+")
+
+
+def _digits(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    digits = _NON_DIGITS.sub("", value)
+    return digits or None
+
+
+def normalize_person_name(value: Any) -> str | None:
+    """Caixa alta, sem acento, espaços colapsados: "José  da Silva" → "JOSE DA SILVA".
+
+    Sem acento porque a mesma pessoa chega com e sem ele conforme o banco do outro
+    lado — e uma diferença de `É` para `E` não pode transformar transferência
+    própria em receita.
+    """
+    if not isinstance(value, str):
+        return None
+    decomposed = unicodedata.normalize("NFKD", value)
+    without_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    name = _SPACES.sub(" ", without_marks).strip().upper()
+    return name or None
+
+
+@dataclass(frozen=True, repr=False)
+class HolderIdentity:
+    """CPF(s) e nome(s) do titular, tirados das contas do item. Vive só em memória.
+
+    `repr` mostra só as contagens: um `logger.exception` com esta instância no
+    traceback não pode despejar o documento no log.
+    """
+
+    documents: frozenset[str] = frozenset()
+    names: frozenset[str] = frozenset()
+
+    def __repr__(self) -> str:
+        return f"HolderIdentity(documents={len(self.documents)}, names={len(self.names)})"
+
+    @property
+    def known(self) -> bool:
+        return bool(self.documents or self.names)
+
+
+def holder_identity(accounts: Iterable[dict[str, Any]]) -> HolderIdentity:
+    """O titular a partir das contas cruas da Pluggy (`taxNumber` e `owner`)."""
+    documents: set[str] = set()
+    names: set[str] = set()
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        document = _digits(account.get("taxNumber"))
+        if document:
+            documents.add(document)
+        name = normalize_person_name(account.get("owner"))
+        if name:
+            names.add(name)
+    return HolderIdentity(documents=frozenset(documents), names=frozenset(names))
+
+
+def counterparty_is_holder(tx: dict[str, Any], holder: HolderIdentity | None) -> bool | None:
+    """O outro lado da transação é o próprio titular? Pura.
+
+    A ponta que importa depende da direção: numa saída, quem **recebeu**; numa
+    entrada, quem **pagou**. Casa primeiro pelo documento e, se ele faltar, pelo
+    nome normalizado — exato, sem aproximação: um falso positivo tira gasto real
+    dos totais, que é o erro mais caro.
+
+    `None` é "não sei" — sem titular conhecido, sem `paymentData`, ou ponta sem
+    documento nem nome — e não pode ser lido como "não é".
+    """
+    if holder is None or not holder.known:
+        return None
+    payment = tx.get("paymentData")
+    if not isinstance(payment, dict):
+        return None
+
+    direction = tx.get("type")
+    if direction not in ("DEBIT", "CREDIT"):
+        amount = as_decimal(tx.get("amount"))
+        if amount is None or amount == 0:
+            return None
+        direction = "DEBIT" if amount < 0 else "CREDIT"
+    party = payment.get("receiver" if direction == "DEBIT" else "payer")
+    if not isinstance(party, dict):
+        return None
+
+    document_block = party.get("documentNumber")
+    document = _digits(document_block.get("value")) if isinstance(document_block, dict) else None
+    name = normalize_person_name(party.get("name"))
+
+    if document and document in holder.documents:
+        return True
+    if name and name in holder.names:
+        return True
+    if document or name:
+        return False
+    return None
 
 
 # --- helpers ----------------------------------------------------------------
@@ -323,9 +440,10 @@ def map_account(
 ) -> dict[str, Any]:
     """Conta da Pluggy → colunas de `accounts`.
 
-    `taxNumber` (CPF) e `owner` **não são copiados**: dado pessoal sem uso no MVP, e
-    minimização é princípio da LGPD (art. 6º, III). Ficam de fora inclusive do
-    `bank_data`, que é copiado como veio.
+    `taxNumber` (CPF) e `owner` **não são copiados**: minimização é princípio da
+    LGPD (art. 6º, III). Ficam de fora inclusive do `bank_data`, que é copiado como
+    veio. O único uso deles é em memória, por `holder_identity`, para reconhecer
+    transferência entre contas próprias.
 
     Chaves uniformes pela mesma razão de `map_transaction` — o upsert de contas usa
     a mesma técnica de inspecionar o lote.
@@ -376,8 +494,13 @@ def map_transaction(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     account_type: str | None,
+    holder: HolderIdentity | None,
 ) -> dict[str, Any]:
     """Transação da Pluggy → dict de colunas que `ingestion.py` espera.
+
+    `holder` é obrigatório, mesmo podendo ser `None`: quem chama precisa decidir se
+    tem o titular em mãos. Um default silencioso desligaria a detecção de conta
+    própria num chamador novo sem ninguém notar.
 
     **Todas** as chaves de `TRANSACTION_ROW_KEYS` estão sempre presentes, com `None`
     onde não há dado, e nenhum `if` omite chave. Isso não é preciosismo:
@@ -418,6 +541,8 @@ def map_transaction(
         "categorization_status": CategorizationStatus.PENDING.value,
         # Sem dado pessoal de terceiros; ver `RAW_TRANSACTION_FIELDS`.
         "raw_payload": minimize_raw_payload(tx),
+        # Só o booleano: o documento que o decidiu não sai daqui.
+        "counterparty_is_holder": counterparty_is_holder(tx, holder),
     }
     assert row.keys() == TRANSACTION_ROW_KEYS, (
         "map_transaction mudou de chaves sem atualizar o contrato — "
