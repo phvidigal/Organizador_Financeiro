@@ -5,8 +5,9 @@ LLM self-hosted (Ollama), multi-tenancy com RLS e conformidade com a LGPD.
 Uso pessoal, um único tenant ativo, schema já preparado para vários.
 
 **Estado:** Fases 0 a 3 concluídas (infra, schema, integração Pluggy,
-categorização por LLM). Fase 4 construída — **tela de revisão** e **painel
-mensal** —, falta conferir o painel contra o extrato real (ver
+categorização por LLM). Fase 4 construída — **tela de revisão**, **painel
+mensal**, **regras do titular** e **conta própria por evidência** —, falta
+conferir o painel contra o extrato real (ver
 [`docs/pendencias-no-host.md`](docs/pendencias-no-host.md)). O roadmap completo e
 o racional das decisões estão no [README](README.md).
 
@@ -50,11 +51,19 @@ daquele módulo e quebraria as três regras em silêncio.
 
 ### 1b. Gravação de categorização passa por `app/services/categorization/store.py`
 
-`apply_decision` grava seis colunas de uma vez: `category_id`, `category_source`,
-`categorization_status`, `category_confidence`, `categorized_at` e **`kind`**. A
-última é a que se esquece, e é a que importa para o dashboard — sem herdá-la de
-`categories.kind`, um pagamento de fatura classificado como "Transferências"
-continua contando como gasto.
+`apply_decision` grava sete colunas de uma vez: `category_id`, `category_source`,
+`categorization_status`, `category_confidence`, `categorized_at`, **`kind`** e
+**`category_rule_id`**. O `kind` é o que se esquece, e é o que importa para o
+dashboard — sem herdá-lo de `categories.kind`, um pagamento de fatura
+classificado como "Transferências" continua contando como gasto. O
+`category_rule_id` é limpo em toda escrita que não seja de regra: senão desativar
+a regra devolveria à fila uma linha que outra pessoa redecidiu.
+
+São três caminhos: `apply_decision` (LLM), `apply_rule_decision` /
+`apply_own_transfer_evidence` (regras) e `apply_manual_decision` (titular). Os
+automáticos repetem `category_source IS DISTINCT FROM 'MANUAL'` no próprio
+UPDATE. **Precedência: MANUAL > evidência de conta própria > regra do titular >
+LLM.**
 
 `apply_manual_decision` é a irmã, para a correção do titular: mesmas seis colunas,
 `category_source = 'MANUAL'`, status sempre `CATEGORIZED` e
@@ -92,11 +101,22 @@ fica em `raw_payload` — minimizada, sem dado pessoal de terceiros (ver
 ### 4. `kind` é separado de categoria
 
 `INCOME` / `EXPENSE` / `TRANSFER`. O dashboard soma por `kind` e agrupa por
-categoria. `TRANSFER` **nunca** é inferido automaticamente — depende de saber que
-o destino é conta do próprio titular. Até ser classificada, transferência conta
+categoria. `TRANSFER` **nunca é inferido por palpite** — depende de saber que o
+destino é conta do próprio titular. Até ser classificada, transferência conta
 como gasto (o erro oposto esconderia gasto real).
 
+A única inferência automática é por **evidência da origem**:
+`counterparty_is_holder IS TRUE` (o CPF ou o nome de quem pagou/recebeu, vindo da
+Pluggy, é o do titular). Aí o passo de regras do job manda a linha para
+`Transferências > Transferência entre contas próprias`. O LLM escolhendo essa
+categoria sem evidência é **pergunta** (`NEEDS_REVIEW`, `kind` do sinal mantido),
+nunca decisão — ver `decide.decide`.
+
 Categoria declara seu `kind`; a transação herda ao ser categorizada.
+
+`OWN_TRANSFER_LABEL` e `PIX_SENT_LABEL` (`catalog.py`) são as duas categorias que
+o código conhece pelo nome. Renomeá-las na taxonomia desliga o comportamento — o
+job só avisa; `test_seed_has_the_categories_the_code_knows_by_name` confere o seed.
 
 ### 5. Migration e modelos não podem divergir
 
@@ -134,9 +154,16 @@ máquina — e quebrar qualquer uma delas abre o extrato sem erro nenhum:
   pagou ou recebeu — não chega ao banco. Campo novo só entra por decisão
   explícita, nunca por ter aparecido na resposta. A migration `0006` limpou o
   histórico com uma cópia congelada da lista; não a edite junto.
+- **`counterparty_is_holder` é só o booleano.** O sync compara o documento e o
+  nome da contraparte com os do titular (`taxNumber`/`owner` das contas) **em
+  memória**, em `mappers.counterparty_is_holder`, e grava apenas o resultado.
+  `HolderIdentity` tem `repr` que mostra só contagens, para um traceback não levar
+  CPF ao log. Não persista o documento "para depurar": o diagnóstico mostra
+  contagens (`GET /pluggy/diagnostics` → `titular`, `contraparte`).
 
 Testes: `tests/test_api_security.py`, `tests/test_config.py`,
-`tests/test_pluggy_mappers.py` e `tests/test_migrations.py`.
+`tests/test_pluggy_mappers.py`, `tests/test_pluggy_sync.py` e
+`tests/test_migrations.py`.
 
 ---
 
@@ -158,18 +185,31 @@ docker compose exec backend pytest -q
 docker compose exec backend ruff check . --fix
 ```
 
-- Frontend <http://localhost:3000> · API <http://localhost:8000/docs>
+```bash
+docker compose exec frontend npm run typecheck
+```
+
+- Frontend <http://localhost:3000> (abre o painel; o diagnóstico do setup está em
+  `/diagnostico`) · API <http://localhost:8000/docs>
 - `psql`: `docker compose exec db psql -U postgres -d finance`
 
 ## Particularidades do ambiente
 
-- **O código é escrito na nuvem; o app roda em outra máquina.** Não há como
-  executar nada no host a partir da sessão. Mudança que exija comando lá
-  (rebuild, migration, conferência com dado real) entra em
+- **Duas máquinas, e só uma tem o dado real.** O código é escrito numa máquina de
+  desenvolvimento (Windows) que roda a stack em Docker com dados sintéticos — a
+  suíte, o typecheck e as telas dá para conferir ali antes do push. O app de
+  verdade (banco com o extrato, Ollama na GPU) roda em **outra** máquina, que a
+  sessão não alcança. Mudança que exija comando lá (rebuild, migration,
+  conferência com dado real) entra em
   [`docs/pendencias-no-host.md`](docs/pendencias-no-host.md) no mesmo commit —
   é a única lista que o titular consulta antes de subir o app.
+- **Na máquina de desenvolvimento a porta 5432 é de outro projeto.** O `.env` de
+  lá usa `POSTGRES_PORT=5433`, com senhas descartáveis e sem credencial da Pluggy.
+- **`.gitattributes` força LF.** Sem ele, um clone no Windows com
+  `core.autocrlf=true` quebra o script de init do Postgres (`/bin/bash^M`).
+  Script que reescreve arquivo do repo no Windows deve gravar com `newline="\n"`.
 - **Docker Desktop** pode não estar rodando; precisa ser iniciado à mão no Windows.
-- **Node não está instalado no host.** O frontend só roda em container.
+- **Node não está instalado no host do app.** O frontend só roda em container.
 - **Ollama roda fora do Docker**, alcançado em `host.docker.internal:11434`.
   Modelo: `qwen3.5:9b`. Há GPU dedicada — pode chamar uma vez por transação.
   Diagnóstico: `GET /health/ollama`.
@@ -314,19 +354,58 @@ em `pluggy/runner.py`, porque aquele pacote não deve conhecer a Fase 3.
   conta própria tem casa separada:
   `Transferências > Transferência entre contas próprias`.
 - **A confiança é o canal de pergunta do LLM.** Só o titular sabe quem é o
-  remetente de um Pix, então a regra 3c do `SYSTEM_PROMPT` manda usar confiança
+  remetente de um Pix, então a regra 3b do `SYSTEM_PROMPT` manda usar confiança
   abaixo de 0.5 quando a descrição não decide — o que joga a linha em
   `NEEDS_REVIEW` em vez de cravar. 🔬 Funciona: os 32 `Pix recebido` reais foram
-  todos para revisão, e os 15 `Transferência entre contas próprias` (mesmo nome no
-  remetente) passaram direto. Afrouxar essa regra transforma pergunta em palpite.
-- **`Pix enviado` continua `TRANSFER`**, e é o espelho não resolvido: pagar alguém
-  por serviço é despesa. A regra 3b manda preferir a categoria do que foi pago,
-  mas quem sobra em `Pix enviado` sem motivo conhecido continua fora dos gastos.
+  todos para revisão. Afrouxar essa regra transforma pergunta em palpite.
+- **Escolher certas categorias também é pergunta.** `Outros > Pix enviado`
+  (migration `0008`, agora `EXPENSE`) quer dizer "não sei com o que foi gasto": vai
+  para revisão com qualquer confiança, com a pergunta que a tela mostra
+  (`decide.question_for`). Conta própria sem evidência idem (invariante 4).
+- **O prompt tem a linha "contraparte"** (pessoa física / empresa), tirada do
+  **tipo** de documento que `raw_payload.paymentData` guarda e do
+  `counterparty_is_holder`. Nunca nome nem número.
 - **`Investimentos` é `TRANSFER`, e a distinção com o rendimento é frágil.**
   Aplicar/resgatar move o principal (`Investimentos > …`, TRANSFER); juros e
   dividendos são dinheiro novo (`Receitas > Rendimentos e investimentos`, INCOME).
   A regra 4 do `SYSTEM_PROMPT` é o que separa as duas — mexer nela sem conferir
   "Valor recebido de Investimentos" transforma receita em transferência.
+
+## Fase 4 — regras do titular e conta própria
+
+O job (`categorization/job.py`) roda um **passo de regras antes do LLM**, numa
+unidade de trabalho própria, sem HTTP e sem gastar GPU:
+
+1. **evidência** (`store.apply_own_transfer_evidence`): toda linha com
+   `counterparty_is_holder IS TRUE` e fonte ≠ MANUAL vira conta própria (`RULE`,
+   `category_rule_id` NULL), inclusive decisões antigas do LLM; a que perdeu a
+   evidência (re-sync com contraparte corrigida) volta para a fila;
+2. **regras do titular** (`rules.apply_rules`) sobre o que não tem decisão.
+
+O que sobra `PENDING` vai para o Ollama. Uma regra nasce de uma resposta:
+`PATCH /transactions/{id}` com `rule_pattern` cria uma `CategoryRule` CONTAINS e a
+aplica na hora às linhas `NULL`/`LLM` que casam. `PATCH /rules/{id}` desativa
+(`reset_rule_decisions`, só o que ela decidiu) ou reativa.
+
+O que é fácil de quebrar sem saber:
+
+- **Casar é por `fold`** (`app/core/text.py`): caixa alta, sem acento, espaços
+  colapsados — a mesma função que o sync usa para o nome do titular. O padrão é
+  gravado já dobrado. Avaliação em Python, não SQL: o Postgres não tem `unaccent`.
+- **Ordem de avaliação**: `priority`, depois o trecho **mais longo** primeiro,
+  depois o mais antigo. Sem o comprimento, "IFOOD MERCADO" nunca venceria "IFOOD".
+- **A regra herda o `kind` da categoria.** Com o `kind` sobreposto na correção, o
+  `PATCH` recusa a regra (400) — os próximos sairiam diferentes deste.
+- **Recusa antes de escrever.** Trecho curto (< `MIN_PATTERN_LENGTH`), que não
+  aparece na descrição ou com `kind` sobreposto: 400 sem revisão nem correção
+  gravadas pela metade.
+- **Desativar não dispara o job no mesmo request.** A sessão da dependency só
+  confirma no teardown; a tela chama `POST /categorization/run` num request à
+  parte, depois.
+- **No painel, conta própria sai de tudo** (`dashboard.summarize` →
+  `own_transfer`), mas só com `kind = TRANSFER`: a sugestão sem evidência fica nos
+  totais até a resposta. No extrato, `hide_own_transfers` usa `IS DISTINCT FROM`
+  para não esconder linha sem categoria.
 
 ## Fase 4 — como a revisão funciona
 
@@ -372,8 +451,12 @@ O que é fácil de quebrar sem saber:
   sem esse caminho ficaria sem conserto.
 
 Frontend em `frontend/src/`: `lib/api.ts` (cliente e tipos),
-`components/category-picker.tsx` (o controle que grava), `components/nav.tsx`,
-`app/revisao/page.tsx`, `app/painel/page.tsx`. O alias `@/*` aponta para `src/`.
+`components/category-picker.tsx` (o controle que grava, com "sempre assim com
+[trecho]"), `components/rule-toggle.tsx`, `components/nav.tsx`,
+`app/revisao/page.tsx`, `app/painel/page.tsx`, `app/regras/page.tsx`. O alias
+`@/*` aponta para `src/`. Constante usada por Server Component mora em
+`lib/api.ts`, nunca num módulo `"use client"`: importada de lá, ela chega como
+referência de cliente, não como valor.
 
 ## Fase 4 — como o painel soma
 
@@ -386,7 +469,11 @@ O que é fácil de quebrar sem saber:
 - **A soma é por `kind`, com sinal — nunca pelo sinal do valor.** Estorno
   categorizado como despesa é `EXPENSE` positivo e *abate* o gasto. Separar
   "entradas" e "saídas" pelo sinal o contaria como receita.
-- **`TRANSFER` fica fora de `net`**, e vem à parte com `inflow`/`outflow`.
+- **`TRANSFER` fica fora de `net`**, e vem à parte com `inflow`/`outflow`. A conta
+  própria sai até daí, para `own_transfer` (ver a seção de regras).
+- **`current_balance` é fotografia, não fluxo**: `accounts.balance` das contas
+  BANK em BRL, ignorando o período; `None` com filtro de cartão. Não fecha com
+  `net`, e a tela diz isso.
 - **Linha sem decisão entra no total e é declarada.** `PENDING`, `NEEDS_REVIEW` e
   `FAILED` têm `kind` provisório — o do sinal, ou o palpite que pediu revisão.
   Tirá-las esconderia gasto real (invariante 4); por isso cada total traz
@@ -418,5 +505,8 @@ invariante 6.
 
 ## Fora de escopo no MVP
 
-Plano comercial da Pluggy · pipeline híbrida (regras + embeddings) · multi-tenancy
-real com vários usuários pagantes — só o schema preparado.
+Plano comercial da Pluggy · embeddings na pipeline (as regras já existem) ·
+multi-tenancy real com vários usuários pagantes — só o schema preparado ·
+categorização por API externa (decidido manter o Ollama local: a assinatura do
+Claude não pode ser usada pelo backend, e a alternativa paga tiraria da máquina as
+descrições com nome de terceiros).
