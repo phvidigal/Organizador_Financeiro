@@ -13,8 +13,9 @@ export function Nav() {
       <Link href="/painel">Painel</Link>
       <Link href="/transacoes">Transações</Link>
       <Link href="/revisao">Revisão</Link>
+      <Link href="/regras">Regras</Link>
       <Link href="/conexoes">Conexões</Link>
-      <Link href="/">Diagnóstico</Link>
+      <Link href="/diagnostico">Diagnóstico</Link>
     </nav>
   );
 }

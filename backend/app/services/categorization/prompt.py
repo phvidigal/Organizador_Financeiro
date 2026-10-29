@@ -19,7 +19,11 @@ from datetime import date as date_type
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.services.categorization.catalog import CategoryCatalog
+from app.services.categorization.catalog import (
+    OWN_TRANSFER_LABEL,
+    PIX_SENT_LABEL,
+    CategoryCatalog,
+)
 from app.services.categorization.errors import OllamaResponseError
 
 # Alguns modelos de raciocínio (o qwen3 é um) escrevem o raciocínio no conteúdo
@@ -30,7 +34,7 @@ _THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 
 _ERROR_EXCERPT = 300
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = f"""\
 Você classifica transações financeiras de uma pessoa física brasileira.
 
 Receberá uma lista fechada de categorias e uma transação. Escolha exatamente uma \
@@ -43,20 +47,22 @@ estabelecimento, bandeiras e siglas comuns no extrato brasileiro (por exemplo \
 2. O "palpite do agregador", quando presente, é apenas uma pista. Ele costuma usar \
 categorias genéricas como balde e erra com frequência em compras no débito; \
 discorde dele quando a descrição indicar outra coisa.
-3. "Transferências" é para dinheiro que continua com o titular: movimentação \
-entre contas dele mesmo e pagamento de fatura de cartão. NÃO é um balde para todo \
-Pix.
-3a. Pix RECEBIDO de outra pessoa ou de empresa é receita. Só é \
-"Transferência entre contas próprias" quando houver evidência de que o remetente é \
-o próprio titular — tipicamente o mesmo nome. Valor redondo que se repete todo mês, \
-ou remetente que é pessoa jurídica, é sinal de renda.
-3b. Pix ENVIADO em pagamento de algo (restaurante, aluguel, serviço, pessoa que \
-prestou serviço) é despesa, e deve receber a categoria do que foi pago, não \
-"Pix enviado". Use "Pix enviado" apenas quando o destino for conta do próprio \
-titular ou quando não houver como saber o motivo.
-3c. **Quando a descrição não permitir decidir se um Pix é transferência ou não, \
-use confiança BAIXA (abaixo de 0.5).** Só o titular sabe quem é o remetente ou o \
-destinatário; um palpite com confiança alta impede que ele seja consultado.
+3. "Transferências" é para dinheiro que continua com o titular: pagamento de fatura \
+de cartão e movimentação entre contas dele. NÃO é um balde para todo Pix.
+3a. A transferência entre contas do próprio titular é reconhecida pelo sistema, \
+comparando o documento de quem pagou e de quem recebeu — você não precisa \
+adivinhá-la. Só escolha "{OWN_TRANSFER_LABEL}" se a descrição disser isso com todas as \
+letras (por exemplo "mesma titularidade"); se a linha "contraparte" disser que é \
+outra pessoa ou uma empresa, não é.
+3b. Pix RECEBIDO de outra pessoa ou de empresa é receita. Valor redondo que se \
+repete todo mês, ou remetente que é pessoa jurídica, é sinal de renda. **Quando a \
+descrição não permitir decidir que receita é, use confiança BAIXA (abaixo de \
+0.5)**: só o titular sabe quem é o remetente, e um palpite com confiança alta \
+impede que ele seja consultado.
+3c. Pix ENVIADO em pagamento de algo (restaurante, aluguel, serviço, pessoa que \
+prestou serviço) é despesa, e deve receber a categoria do que foi pago. Quando a \
+descrição não disser com o que o dinheiro foi gasto, escolha "{PIX_SENT_LABEL}": o \
+titular será perguntado.
 4. Aplicar ou resgatar investimento (CDB, RDB, Tesouro, ações, fundos, cripto, \
 previdência) pertence à árvore "Investimentos": o principal continua sendo do \
 titular, só mudou de conta. O RENDIMENTO é outra coisa — juros, dividendos e \
@@ -94,6 +100,36 @@ class TransactionForPrompt:
     pluggy_category_name: str | None = None
     pluggy_category_id: str | None = None
     account_type: str | None = None
+    # O que se sabe do outro lado, já em palavras (`describe_counterparty`). É o
+    # sinal que separa "Pix de empresa" de "Pix de uma pessoa" sem nome nem CPF de
+    # ninguém no prompt.
+    counterparty: str | None = None
+    counterparty_is_holder: bool | None = None
+
+
+def describe_counterparty(
+    amount: Decimal, is_holder: bool | None, payment_data: Any
+) -> str | None:
+    """A linha "contraparte" do prompt, a partir do que o banco guarda. Pura.
+
+    Usa o flag de `counterparty_is_holder` e o **tipo** de documento que
+    `raw_payload.paymentData` mantém (CPF ou CNPJ, nunca o número). A ponta é a mesma
+    do sync: quem recebeu numa saída, quem pagou numa entrada.
+    """
+    if is_holder is True:
+        return "o próprio titular"
+    document_type = None
+    if isinstance(payment_data, dict):
+        party = payment_data.get("receiver" if amount < 0 else "payer")
+        if isinstance(party, dict) and isinstance(party.get("documentNumber"), dict):
+            document_type = party["documentNumber"].get("type")
+    if document_type == "CNPJ":
+        return "empresa (CNPJ)"
+    if document_type == "CPF":
+        return "outra pessoa física" if is_holder is False else "pessoa física"
+    if is_holder is False:
+        return "não é o titular"
+    return None
 
 
 @dataclass(frozen=True)
@@ -173,6 +209,8 @@ def build_messages(
     merchant = _merchant_name(tx.merchant)
     if merchant:
         lines.append(f"  estabelecimento: {merchant}")
+    if tx.counterparty:
+        lines.append(f"  contraparte: {tx.counterparty}")
     if tx.pluggy_category_name:
         lines.append(f"  palpite do agregador: {tx.pluggy_category_name}")
 

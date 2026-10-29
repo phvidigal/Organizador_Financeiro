@@ -4,8 +4,9 @@ SaaS de finanças pessoais com agregação via Open Finance (Pluggy), categoriza
 automática por LLM self-hosted (Ollama) e conformidade com a LGPD desde o schema.
 
 **Estado atual: Fases 0 a 3 concluídas** — infraestrutura, modelagem, integração
-com a Pluggy e categorização por LLM. A Fase 4 está construída — fila de revisão e
-painel mensal —, e falta conferir o painel contra o extrato real.
+com a Pluggy e categorização por LLM. A Fase 4 está construída — fila de revisão,
+painel mensal, regras do titular e transferência entre contas próprias por
+evidência —, e falta conferir o painel contra o extrato real.
 
 ## Stack
 
@@ -45,9 +46,13 @@ Aplique as migrations:
 docker compose exec backend alembic upgrade head
 ```
 
-- Frontend: <http://localhost:3000/painel> — o mês por receita, despesa e categoria;
-  <http://localhost:3000> é o diagnóstico das três conexões
+- Frontend: <http://localhost:3000> — abre o painel: o mês por receita, despesa e
+  categoria; <http://localhost:3000/diagnostico> é o diagnóstico das três conexões
 - API: <http://localhost:8000/docs>
+
+> Numa máquina em que a porta 5432 já é de outro Postgres, use `POSTGRES_PORT`
+> no `.env` (por exemplo `5433`): ela só muda a porta publicada no host; dentro da
+> rede do compose o banco continua em `db:5432`.
 
 Testes:
 
@@ -164,7 +169,11 @@ legacy/      Protótipo SQLite original, apenas como referência
   - [x] tela de revisão e correção manual (`PATCH /transactions/{id}`,
         `categorization_reviews`)
   - [x] painel mensal (`GET /dashboard/summary`, `/painel`): filtro por mês e
-        conta, categoria como drill-down para o extrato
+        conta, categoria como drill-down para o extrato, saldo em conta
+  - [x] transferência entre contas próprias por evidência (CPF/nome da
+        contraparte), fora de todos os totais
+  - [x] regras do titular: "sempre assim com [trecho]" na revisão, `/regras`
+  - [x] `Pix enviado` como despesa, com a pergunta "com o que foi gasto?"
 - [ ] **Fase 5** — LGPD: criptografia em repouso, retenção e registro de consentimento
 
 O contexto já levantado para as Fases 4 e 5 — decisões tomadas, questões em
@@ -192,6 +201,38 @@ Duas escolhas que não são óbvias:
 
 Cada categoria leva ao extrato filtrado pelo mesmo mês e `kind`, onde a linha se
 corrige — e a correção muda o painel na hora.
+
+### Transferência entre contas próprias, e as regras do titular
+
+**A transferência para uma conta sua sai de tudo** — receita, despesa e até o bloco
+de transferências — e vira uma nota: "N transferências entre suas contas não
+entram em nada". No extrato ela fica oculta, com um chip para mostrar.
+
+O desafio era reconhecê-la sem palpite, porque o outro lado costuma estar **fora
+da Pluggy** (outro banco, carteira digital): não há par de lançamentos para casar.
+A evidência é o documento. A Pluggy manda, em `paymentData`, o CPF e o nome de quem
+pagou e de quem recebeu, e as contas do item trazem os do titular. O sync compara
+os dois **em memória** e grava só um booleano, `counterparty_is_holder` — o
+documento de ninguém chega ao banco, como desde a migration `0006`.
+
+Com o flag, um passo de regras roda **antes do LLM** e manda a linha para
+`Transferências > Transferência entre contas próprias`, sem gastar GPU. O LLM não
+decide isso sozinho: se escolher conta própria sem evidência, a linha vai para a
+revisão com a pergunta "esta transferência foi entre contas suas?" e continua nos
+totais até a resposta — esconder receita ou gasto real é o erro mais caro.
+
+**`Pix enviado` virou despesa** (migration `0008`, o espelho da `0004`). Antes ele
+era `TRANSFER`, e todo Pix sem motivo conhecido saía dos gastos calado. Agora que a
+conta própria tem caminho próprio, o que sobra em `Pix enviado` é pagamento a
+alguém — e a revisão pergunta "com o que foi gasto este Pix?".
+
+**As respostas viram regras.** Na revisão ou no extrato, "sempre assim com
+[trecho]" cria uma regra com o trecho que se repete (o backend sugere — de "PIX
+ENVIADO 12/08 FULANO DE TAL" sobra "FULANO DE TAL"). Ela vale na hora para o que o
+LLM tinha decidido e para o que está na fila, e o próximo Pix para a mesma pessoa
+não é mais perguntado. Quem decide, nesta ordem: o que você respondeu à mão, a
+evidência de conta própria, as regras e, por último, o LLM. Desativar uma regra em
+`/regras` devolve à fila só o que ela decidiu.
 
 ### Como a Fase 3 categoriza
 

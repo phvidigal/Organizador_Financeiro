@@ -474,8 +474,9 @@ autenticação real.
 | **A fronteira principal × rendimento depende do prompt** | regra 4 do `SYSTEM_PROMPT`; mexer nela sem conferir "Valor recebido de Investimentos" transforma receita em transferência |
 | **"Pension"/"Retirement" e "Automatic investment" ficaram sem de/para** | duas categorias da Pluggy disputando uma nossa; `pluggy_category_id` é coluna única |
 | ~~`Pix recebido` é `TRANSFER` e engole receita~~ | ✅ migration `0004`: movido para `Receitas` (`INCOME`); a receita reconhecida foi de <1% para ~100% do que entrou |
-| **`Pix enviado` continua `TRANSFER`** | espelho não resolvido: pagar alguém por serviço é despesa. A regra 3b manda preferir a categoria do que foi pago, mas o resto fica fora dos gastos |
-| **O laço de aprendizado não existe** | o LLM não vê as correções `MANUAL`; realimentar é a pipeline híbrida. A tela já existe, e `categorization_reviews` é o insumo — falta a camada que lê dali |
+| ~~`Pix enviado` continua `TRANSFER`~~ | ✅ migration `0008`: `Outros > Pix enviado`, `EXPENSE`. Escolhê-la é pergunta ("com o que foi gasto?"), `NEEDS_REVIEW` com qualquer confiança. A conta própria passou a ter caminho próprio, por evidência |
+| ~~Transferência entre contas próprias depende do palpite do LLM~~ | ✅ `counterparty_is_holder` (CPF/nome da contraparte comparado em memória no sync, só o booleano gravado) e o passo de regras do job. 🔬 Falta confirmar no host que o MeuPluggy manda `taxNumber` e `paymentData.documentNumber` — `docs/pendencias-no-host.md`, item 5 |
+| **O laço de aprendizado existe pela metade** | ✅ regras do titular: "sempre assim com [trecho]" na revisão vira `category_rules` CONTAINS, aplicada antes do LLM. ⚠️ O LLM continua sem ver as correções `MANUAL` que não viraram regra; embeddings seguem fora |
 | **Limiar `LOW_CONFIDENCE = 0.70` continua sem calibração** | ele *dispara* (70 dos 137 `NEEDS_REVIEW`), e agora **há como medir**: `categorization_reviews` guarda `previous_confidence` ao lado da resposta. Falta volume de correções |
 | ~~O dashboard não existe~~ | ✅ `/painel` e `GET /dashboard/summary`; índice com `kind` medido e descartado (0,7 ms com 50 mil linhas sintéticas). Falta conferir contra o extrato real |
 | Descrição corrigida na origem não invalida a categoria já gravada | escape é `POST /categorization/reset`, não invalidação automática |

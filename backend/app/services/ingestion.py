@@ -138,6 +138,10 @@ _SYNCABLE_COLUMNS = (
     "pluggy_category_id",
     "pluggy_category_name",
     "raw_payload",
+    # Derivada de `paymentData` a cada sync. Se a origem corrigir quem recebeu um
+    # Pix, a evidência de conta própria precisa acompanhar — e quem decide o que
+    # fazer com a mudança é o passo de regras do job (`categorization/job.py`).
+    "counterparty_is_holder",
 )
 
 

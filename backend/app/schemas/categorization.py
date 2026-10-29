@@ -18,6 +18,9 @@ class CategorizationOutcomeRead(BaseModel):
     categorized: int
     needs_review: int
     failed: int
+    # Decididas sem o LLM — evidência de conta própria ou regra do titular.
+    by_rule: int = 0
+    returned_to_queue: int = 0
     error: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
 

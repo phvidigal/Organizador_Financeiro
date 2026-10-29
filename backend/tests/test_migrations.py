@@ -124,6 +124,27 @@ async def test_seed_creates_default_tenant_and_categories(admin_session) -> None
     assert unmapped == 0
 
 
+async def test_seed_has_the_categories_the_code_knows_by_name(admin_session) -> None:
+    """`OWN_TRANSFER_LABEL` e `PIX_SENT_LABEL` existem no seed, com o `kind` certo.
+
+    Renomear uma delas na taxonomia desligaria a conta própria e a pergunta do Pix
+    sem erro nenhum — o job só registraria um aviso.
+    """
+    from app.services.categorization.catalog import OWN_TRANSFER_LABEL, PIX_SENT_LABEL
+
+    rows = await admin_session.execute(
+        text(
+            "SELECT p.name || ' > ' || c.name, c.kind FROM categories c "
+            "JOIN categories p ON p.id = c.parent_id "
+            "WHERE c.tenant_id = '00000000-0000-0000-0000-000000000001'"
+        )
+    )
+    by_label = dict(rows.all())
+
+    assert by_label[OWN_TRANSFER_LABEL] == "TRANSFER"
+    assert by_label[PIX_SENT_LABEL] == "EXPENSE"
+
+
 async def test_investment_tree_is_transfer_not_expense(admin_session) -> None:
     """Aplicar não é gastar, resgatar não é receber.
 
@@ -209,5 +230,100 @@ async def test_0006_strips_personal_data_already_stored() -> None:
 
         assert stored == minimize_raw_payload(tx)
         assert "Fulano de Tal" not in json.dumps(stored)
+    finally:
+        await drop_database(db_name)
+
+
+async def test_0008_pix_enviado_becomes_expense() -> None:
+    """`Pix enviado` muda de árvore e de natureza, e as transações acompanham.
+
+    A decisão do LLM volta para a fila — foi tomada sob o significado antigo — e a
+    correção do titular fica, só herdando o `kind` novo. O caminho de volta desfaz
+    os dois lados.
+    """
+    db_name = f"migration_0008_{uuid.uuid4().hex[:8]}"
+    await create_database(db_name)
+    url = url_for_database(db_name)
+    tenant = "00000000-0000-0000-0000-000000000001"
+
+    async def state(conn) -> dict[str, tuple]:
+        rows = await conn.execute(
+            text(
+                "SELECT external_id, category_id IS NOT NULL, category_source, "
+                "categorization_status, kind FROM transactions ORDER BY external_id"
+            )
+        )
+        return {row[0]: tuple(row[1:]) for row in rows}
+
+    try:
+        run_migrations(url, "0007_counterparty_and_rule")
+
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            pix_enviado = await conn.scalar(
+                text(
+                    "SELECT c.id FROM categories c JOIN categories p ON p.id = c.parent_id "
+                    "WHERE c.name = 'Pix enviado' AND p.name = 'Transferências'"
+                )
+            )
+            account_id = uuid.uuid4()
+            await conn.execute(
+                text(
+                    "INSERT INTO accounts (id, tenant_id, type, name) "
+                    "VALUES (:id, :tenant, 'BANK', 'Conta')"
+                ),
+                {"id": str(account_id), "tenant": tenant},
+            )
+            for external_id, source in (("llm", "LLM"), ("manual", "MANUAL")):
+                await conn.execute(
+                    text(
+                        "INSERT INTO transactions (tenant_id, account_id, source, "
+                        "external_id, amount, kind, date, description_raw, category_id, "
+                        "category_source, categorization_status) VALUES (:tenant, "
+                        ":account, 'PLUGGY', :ext, -80.00, 'TRANSFER', DATE '2026-08-05', "
+                        "'PIX ENVIADO FULANO', :category, :source, 'CATEGORIZED')"
+                    ),
+                    {
+                        "tenant": tenant,
+                        "account": str(account_id),
+                        "ext": external_id,
+                        "category": str(pix_enviado),
+                        "source": source,
+                    },
+                )
+        await engine.dispose()
+
+        run_migrations(url)
+
+        engine = create_async_engine(url)
+        async with engine.connect() as conn:
+            category = (
+                await conn.execute(
+                    text(
+                        "SELECT p.name, c.kind FROM categories c "
+                        "JOIN categories p ON p.id = c.parent_id WHERE c.id = :id"
+                    ),
+                    {"id": str(pix_enviado)},
+                )
+            ).one()
+            after = await state(conn)
+        await engine.dispose()
+
+        assert tuple(category) == ("Outros", "EXPENSE")
+        assert after["llm"] == (False, None, "PENDING", "EXPENSE")
+        assert after["manual"] == (True, "MANUAL", "CATEGORIZED", "EXPENSE")
+
+        downgrade_migrations(url, "0007_counterparty_and_rule")
+
+        engine = create_async_engine(url)
+        async with engine.connect() as conn:
+            kind = await conn.scalar(
+                text("SELECT kind FROM categories WHERE id = :id"), {"id": str(pix_enviado)}
+            )
+            back = await state(conn)
+        await engine.dispose()
+
+        assert kind == "TRANSFER"
+        assert back["manual"] == (True, "MANUAL", "CATEGORIZED", "TRANSFER")
     finally:
         await drop_database(db_name)

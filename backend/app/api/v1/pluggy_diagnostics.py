@@ -36,6 +36,8 @@ from app.core.config import Settings, get_settings
 from app.services.pluggy.client import _loads
 from app.services.pluggy.errors import PluggyError
 from app.services.pluggy.mappers import (
+    counterparty_is_holder,
+    holder_identity,
     jsonable,
     map_account,
     map_item,
@@ -147,6 +149,14 @@ async def diagnostics(
         jsonable(_without(account, _ACCOUNT_PERSONAL_FIELDS)) for account in accounts
     ]
 
+    # Se a detecção de conta própria tem com o que trabalhar. Só contagens: o CPF e
+    # o nome do titular não saem daqui, nem mascarados.
+    holder = holder_identity(accounts)
+    result["titular"] = {
+        "documentos": len(holder.documents),
+        "nomes": len(holder.names),
+    }
+
     contas: list[dict[str, Any]] = []
     for account in accounts:
         entrada: dict[str, Any] = {"id": account.get("id"), "type": account.get("type")}
@@ -172,12 +182,28 @@ async def diagnostics(
             page = await anext(pages, [])
         finally:
             await pages.aclose()
+
+        # Quanto da primeira página a detecção resolveria. `sem_dado` alto quer dizer
+        # que a Pluggy não mandou `paymentData` — aí a evidência não existe, e a
+        # conta própria continua dependendo da revisão.
+        contraparte = {"titular": 0, "outra": 0, "sem_dado": 0}
+        for tx in page:
+            match counterparty_is_holder(tx, holder):
+                case True:
+                    contraparte["titular"] += 1
+                case False:
+                    contraparte["outra"] += 1
+                case None:
+                    contraparte["sem_dado"] += 1
+        entrada["contraparte"] = contraparte
+
         for tx in page[:3]:
             row = map_transaction(
                 tx,
                 tenant_id=_FAKE_TENANT,
                 account_id=account_id,
                 account_type=account.get("type"),
+                holder=holder,
             )
             amostra.append(
                 {
@@ -192,6 +218,7 @@ async def diagnostics(
                         else None,
                         "pluggy_category_id": row["pluggy_category_id"],
                         "pluggy_category_name": row["pluggy_category_name"],
+                        "counterparty_is_holder": row["counterparty_is_holder"],
                     },
                 }
             )

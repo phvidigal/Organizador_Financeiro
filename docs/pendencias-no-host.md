@@ -136,3 +136,72 @@ Trava a tabela por alguns segundos; com o app parado, é imperceptível.
 valor nele, mas os docs descrevem o perfil do extrato real (quantidade de
 lançamentos, parcelas vindas de pessoa jurídica, aplicações em renda variável).
 Torná-lo privado é Settings → General → Danger Zone → Change visibility.
+
+## 5. Conta própria por evidência, Pix enviado como despesa e regras
+
+**Quando:** depois do merge do branch `melhorias-transferencias`. Se os itens 1, 3
+e 4 ainda não foram feitos, este comando cobre os três:
+
+```bash
+git checkout master && git pull
+docker compose up -d --build --renew-anon-volumes
+docker compose exec backend alembic upgrade head
+```
+
+- A `0007` cria `transactions.counterparty_is_holder` e `category_rule_id`.
+- A `0008` move `Pix enviado` para `Outros` como despesa. Decisão do LLM nessa
+  categoria **volta para a fila** — de propósito: o rótulo mudou de significado.
+
+**Sync completo, para calcular a contraparte do histórico.** A `0006` apagou o
+`paymentData` antigo, então só uma releitura da Pluggy preenche o flag. O `id` da
+conexão (não é o `itemId` da Pluggy) sai de:
+
+```bash
+curl -s http://localhost:8000/connections | python -m json.tool | grep -E '"(id|pluggy_item_id)"'
+```
+
+```bash
+curl -s -X POST "http://localhost:8000/connections/<id>/sync?full=true&force=true"
+```
+
+O sync encadeia a categorização: primeiro o passo de regras (conta própria, sem
+GPU), depois o Ollama para o que voltou à fila pela `0008`.
+
+**Conferir que a detecção tem com o que trabalhar** — é a parte que a máquina de
+desenvolvimento não alcança, porque não sabe se o MeuPluggy de fato manda o CPF do
+titular e o de quem pagou/recebeu. Ligue o diagnóstico no `.env`
+(`ENABLE_PLUGGY_DIAGNOSTICS=true`, depois `docker compose up -d --force-recreate
+backend`) e:
+
+```bash
+curl -s "http://localhost:8000/pluggy/diagnostics?item_id=<itemId>" | python -m json.tool | grep -A4 -E '"titular"|"contraparte"'
+```
+
+- `titular.documentos` tem de ser **1** (o seu CPF). Se for 0, as contas não trazem
+  `taxNumber` — anote e traga para a próxima sessão: a alternativa é o produto
+  `IDENTITY` da Pluggy.
+- Em cada conta, `contraparte.titular` deve ser maior que zero se houver Pix entre
+  contas suas na primeira página; `sem_dado` alto quer dizer que a Pluggy não
+  mandou `paymentData`.
+
+Desligue o diagnóstico de novo depois.
+
+**Números** (o mesmo `psql` dos itens anteriores):
+
+```bash
+docker compose exec db psql -U postgres -d finance \
+  -c "SELECT counterparty_is_holder, count(*) FROM transactions WHERE deleted_at IS NULL GROUP BY 1;" \
+  -c "SELECT c.name, t.category_source, count(*), sum(t.amount) FROM transactions t JOIN categories c ON c.id = t.category_id WHERE c.name IN ('Transferência entre contas próprias', 'Pix enviado') GROUP BY 1, 2 ORDER BY 1, 2;" \
+  -c "SELECT count(*) AS pix_enviado_manual FROM transactions t JOIN categories c ON c.id = t.category_id WHERE c.name = 'Pix enviado' AND t.category_source = 'MANUAL';"
+```
+
+- A primeira diz quanto do extrato tem evidência (`t`), não tem (`f`) ou não veio
+  com dado (vazio).
+- A segunda: `RULE` em conta própria é o que a evidência decidiu.
+- A terceira: correções suas que estavam em `Pix enviado` e herdaram `EXPENSE` na
+  `0008`. Se alguma era transferência para conta sua, responda de novo no extrato.
+
+**Conferir no painel** (agosto): as transferências entre contas suas aparecem só
+na nota de "Fora dos totais"; Receitas não deve mais ter o Pix que você mandou para
+si mesmo. A fila de `/revisao` vai ter os `Pix enviado` com a pergunta "com o que
+foi gasto?" — marque "sempre assim com [trecho]" nos que se repetem.

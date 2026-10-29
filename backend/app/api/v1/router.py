@@ -14,6 +14,7 @@ from app.api.v1 import (
     dashboard,
     health,
     pluggy_diagnostics,
+    rules,
     transactions,
 )
 
@@ -23,6 +24,7 @@ api_router.include_router(connections.router)
 api_router.include_router(accounts.router)
 api_router.include_router(transactions.router)
 api_router.include_router(categories.router)
+api_router.include_router(rules.router)
 api_router.include_router(categorization.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(pluggy_diagnostics.router)

@@ -1,0 +1,10 @@
+# LF no checkout, em qualquer sistema.
+#
+# Tudo aqui roda dentro de container Linux, montado por bind mount. Um clone no
+# Windows com `core.autocrlf=true` (o padrão do instalador do Git) entrega os
+# arquivos com CRLF, e o primeiro a quebrar é `infra/postgres/init/01-app-role.sh`:
+# `/bin/bash^M: bad interpreter`, o container do banco morre com 126 e o
+# `app_user` nunca é criado.
+* text=auto eol=lf
+
+*.db binary

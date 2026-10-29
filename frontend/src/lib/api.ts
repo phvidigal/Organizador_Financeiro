@@ -99,8 +99,41 @@ export type Transaction = {
   // É NULL depois de uma correção manual: o número passa a morar em
   // `categorization_reviews`, no backend.
   category_confidence: Money | null;
+  // Qual regra do titular decidiu. NULL com `category_source = "RULE"` é a regra
+  // embutida de conta própria.
+  category_rule_id: string | null;
   pluggy_category_id: string | null;
   pluggy_category_name: string | null;
+  // O outro lado é o próprio titular? Só o booleano chega aqui — o CPF que o
+  // decidiu nunca sai do sync.
+  counterparty_is_holder: boolean | null;
+  // Calculados no servidor, para a regra não ter uma segunda cópia aqui.
+  review_question: string | null;
+  suggested_rule_pattern: string | null;
+};
+
+export type CategorizedTransaction = Transaction & {
+  rule_id: string | null;
+  rule_applied: number | null;
+};
+
+// Parâmetro de URL com quantas linhas a regra recém-criada atualizou. Vai pela URL
+// porque, na fila de revisão, a linha respondida some da lista — e um aviso em
+// estado do componente sumiria junto. Mora aqui, e não no `category-picker`: um
+// valor importado de módulo "use client" chega ao Server Component como
+// referência de cliente, não como a string.
+export const RULE_APPLIED_PARAM = "regra_aplicada";
+
+export type Rule = {
+  id: string;
+  match_type: string;
+  pattern: string | null;
+  category_id: string;
+  // NULL quando a categoria foi desativada depois: a regra para de valer.
+  category_label: string | null;
+  is_active: boolean;
+  created_at: string;
+  applied_count: number;
 };
 
 export type CategorizationStatus =
@@ -186,6 +219,13 @@ export type DashboardSummary = {
   undecided: { pending: number; needs_review: number; failed: number };
   other_currency_count: number;
   latest_date: string | null;
+  // Transferência entre contas próprias: fora de receita, despesa e `transfer`.
+  own_transfer: KindTotal;
+  own_transfer_category_id: string | null;
+  // Saldo das contas na última coleta — fotografia, não fluxo. NULL com filtro de
+  // cartão.
+  current_balance: Money | null;
+  balance_updated_at: string | null;
 };
 
 export type Page<T> = {
@@ -230,6 +270,14 @@ export function formatConfidence(value: Money | null): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 3,
   });
+}
+
+/** "conta · Conta Corrente" / "cartão · Nubank". Com mais de uma conexão, só
+ *  "conta" e "cartão" não dizem de onde veio o lançamento. */
+export function accountLabel(account: Account | undefined, max = 22): string {
+  if (!account) return "—";
+  const tipo = account.type === "CREDIT" ? "cartão" : "conta";
+  return `${tipo} · ${account.name.slice(0, max)}`;
 }
 
 export const KIND_LABEL: Record<Kind, string> = {

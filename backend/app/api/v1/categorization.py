@@ -58,6 +58,8 @@ async def _status(session: AsyncSession, tenant_id: uuid.UUID) -> Categorization
                 categorized=outcome.categorized,
                 needs_review=outcome.needs_review,
                 failed=outcome.failed,
+                by_rule=outcome.by_rule,
+                returned_to_queue=outcome.returned_to_queue,
                 error=outcome.error,
                 warnings=outcome.warnings,
             )

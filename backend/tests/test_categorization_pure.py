@@ -9,20 +9,41 @@ só aparece quando alguém confere uma categorização na tela — semanas depoi
 """
 
 import uuid
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
 from app.models.enums import CategorizationStatus
-from app.services.categorization.catalog import CategoryRow, build_catalog
-from app.services.categorization.decide import LOW_CONFIDENCE, decide
+from app.services.categorization.catalog import (
+    OWN_TRANSFER_LABEL,
+    PIX_SENT_LABEL,
+    CategoryRow,
+    build_catalog,
+)
+from app.services.categorization.decide import (
+    LOW_CONFIDENCE,
+    OWN_TRANSFER_QUESTION,
+    PIX_SENT_QUESTION,
+    decide,
+    question_for,
+)
 from app.services.categorization.errors import OllamaResponseError
 from app.services.categorization.prompt import (
     Answer,
+    TransactionForPrompt,
     build_messages,
     build_schema,
+    describe_counterparty,
     format_amount,
     parse_response,
+)
+from app.services.categorization.rules import (
+    Rule,
+    first_match,
+    normalize_pattern,
+    rule_matches,
+    suggest_pattern,
 )
 
 ALIMENTACAO = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
@@ -327,3 +348,174 @@ def test_unknown_label_goes_to_review_not_failed() -> None:
     assert decision.category_id is None
     # `kind` fica intocado: derivá-lo do nada apagaria uma marcação anterior.
     assert decision.kind is None
+
+
+# ---------------------------------------------------------------------------
+# Perguntas ao titular: Pix enviado e conta própria sem evidência
+# ---------------------------------------------------------------------------
+
+OUTROS = uuid.UUID("00000000-0000-0000-0000-0000000000d1")
+PIX_ENVIADO = uuid.UUID("00000000-0000-0000-0000-0000000000d2")
+CONTA_PROPRIA = uuid.UUID("00000000-0000-0000-0000-0000000000b3")
+OWN_LABEL = "Transferências > Transferência entre contas próprias"
+
+
+def catalog_with_questions():
+    cat = build_catalog(
+        [
+            CategoryRow(ALIMENTACAO, None, "Alimentação", "EXPENSE"),
+            CategoryRow(TRANSFERENCIAS, None, "Transferências", "TRANSFER"),
+            CategoryRow(
+                CONTA_PROPRIA, TRANSFERENCIAS, "Transferência entre contas próprias", "TRANSFER"
+            ),
+            CategoryRow(OUTROS, None, "Outros", "EXPENSE"),
+            CategoryRow(PIX_ENVIADO, OUTROS, "Pix enviado", "EXPENSE"),
+        ]
+    )
+    # Os rótulos que o código conhece pelo nome existem neste catálogo.
+    assert cat.own_transfer is not None and cat.own_transfer.label == OWN_TRANSFER_LABEL
+    assert cat.pix_sent is not None and cat.pix_sent.label == PIX_SENT_LABEL
+    return cat
+
+
+def test_pix_sent_always_goes_to_review_and_counts_as_expense() -> None:
+    """Escolher "Pix enviado" é o modelo dizendo que não sabe com o que foi gasto —
+    mesmo com 0.95. O valor fica nos gastos enquanto o titular não responde."""
+    decision = decide(
+        Answer(category=PIX_SENT_LABEL, confidence=Decimal("0.95")),
+        catalog=catalog_with_questions(),
+        pluggy_category_id=None,
+    )
+
+    assert decision.status == CategorizationStatus.NEEDS_REVIEW
+    assert decision.category_id == PIX_ENVIADO
+    assert decision.kind == "EXPENSE"
+    assert PIX_SENT_QUESTION in (decision.reason or "")
+
+
+def test_own_transfer_without_evidence_is_a_question_not_a_transfer() -> None:
+    """Sem evidência, "entre contas próprias" é palpite — e um palpite que tiraria o
+    valor de todos os totais. Vai para a revisão **sem** mexer no `kind`."""
+    decision = decide(
+        Answer(category=OWN_LABEL, confidence=Decimal("0.95")),
+        catalog=catalog_with_questions(),
+        pluggy_category_id=None,
+        counterparty_is_holder=None,
+    )
+
+    assert decision.status == CategorizationStatus.NEEDS_REVIEW
+    assert decision.category_id == CONTA_PROPRIA
+    assert decision.kind is None
+
+
+def test_own_transfer_with_evidence_is_decided() -> None:
+    decision = decide(
+        Answer(category=OWN_LABEL, confidence=Decimal("0.95")),
+        catalog=catalog_with_questions(),
+        pluggy_category_id=None,
+        counterparty_is_holder=True,
+    )
+
+    assert decision.status == CategorizationStatus.CATEGORIZED
+    assert decision.kind == "TRANSFER"
+
+
+def test_question_for_only_speaks_inside_the_review_queue() -> None:
+    cat = catalog_with_questions()
+
+    def ask(status, category_id, holder=None):
+        return question_for(
+            status=status, category_id=category_id, counterparty_is_holder=holder, catalog=cat
+        )
+
+    assert ask("NEEDS_REVIEW", PIX_ENVIADO) == PIX_SENT_QUESTION
+    assert ask("NEEDS_REVIEW", CONTA_PROPRIA) == OWN_TRANSFER_QUESTION
+    assert ask("NEEDS_REVIEW", CONTA_PROPRIA, holder=True) is None
+    assert ask("CATEGORIZED", PIX_ENVIADO) is None
+    assert ask("NEEDS_REVIEW", ALIMENTACAO) is None
+    assert ask("NEEDS_REVIEW", None) is None
+
+
+# ---------------------------------------------------------------------------
+# Contraparte no prompt
+# ---------------------------------------------------------------------------
+
+
+def test_counterparty_line_uses_the_document_type_never_the_number() -> None:
+    company = {"payer": {"documentNumber": {"type": "CNPJ"}}}
+    person = {"receiver": {"documentNumber": {"type": "CPF"}}}
+
+    assert describe_counterparty(Decimal("100"), None, company) == "empresa (CNPJ)"
+    assert describe_counterparty(Decimal("-100"), False, person) == "outra pessoa física"
+    assert describe_counterparty(Decimal("-100"), None, person) == "pessoa física"
+    assert describe_counterparty(Decimal("-100"), True, person) == "o próprio titular"
+    # Saída olha quem recebeu: o pagador de uma saída é sempre o titular.
+    assert describe_counterparty(Decimal("-100"), None, company) is None
+    assert describe_counterparty(Decimal("-100"), None, None) is None
+
+
+def test_prompt_carries_the_counterparty_line() -> None:
+    tx = TransactionForPrompt(
+        id=uuid.uuid4(),
+        date=date(2026, 8, 5),
+        amount=Decimal("850.00"),
+        description_raw="PIX RECEBIDO",
+        counterparty="empresa (CNPJ)",
+    )
+
+    assert "contraparte: empresa (CNPJ)" in build_messages(tx, catalog())[1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Regras do titular
+# ---------------------------------------------------------------------------
+
+
+def rule(pattern: str, match_type: str = "CONTAINS") -> Rule:
+    normalized = normalize_pattern(pattern)
+    assert normalized is not None
+    return Rule(id=uuid.uuid4(), match_type=match_type, pattern=normalized, category_id=DELIVERY)
+
+
+def test_rule_matches_ignoring_case_accents_and_spacing() -> None:
+    r = rule("joão  da silva")
+
+    assert rule_matches(r, "PIX ENVIADO - JOAO DA SILVA 12/08")
+    assert rule_matches(r, "Pix enviado João da   Silva")
+    assert not rule_matches(r, "PIX ENVIADO MARIA DA SILVA")
+
+
+def test_exact_rule_needs_the_whole_description() -> None:
+    r = rule("netflix.com", match_type="EXACT")
+
+    assert rule_matches(r, "NETFLIX.COM")
+    assert not rule_matches(r, "NETFLIX.COM SAO PAULO")
+
+
+def test_first_match_respects_the_given_order() -> None:
+    specific, generic = rule("ifood mercado"), rule("ifood")
+
+    assert first_match([specific, generic], "IFOOD MERCADO SP") is specific
+    assert first_match([generic, specific], "IFOOD MERCADO SP") is generic
+    assert first_match([specific], "UBER") is None
+
+
+def test_pattern_too_short_is_refused() -> None:
+    """ "PI" está em todo Pix: uma regra assim engoliria o extrato."""
+    assert normalize_pattern(" pi ") is None
+    assert normalize_pattern("   ") is None
+    assert normalize_pattern("abc") == "ABC"
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("PIX ENVIADO 12/08 - FULANO DE TAL", "FULANO DE TAL"),
+        ("Pix recebido João da Silva", "JOAO DA SILVA"),
+        ("TRANSFERENCIA PIX PARA MARIA 0001 12345-6", "MARIA"),
+        ("PADARIA DO ZE LTDA  SAO PAULO BR", "PADARIA DO ZE LTDA SAO PAULO"),
+        ("PIX ENVIADO 123", None),
+    ],
+)
+def test_suggested_pattern_keeps_what_repeats(description: str, expected: str | None) -> None:
+    assert suggest_pattern(description) == expected

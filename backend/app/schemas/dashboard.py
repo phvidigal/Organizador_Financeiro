@@ -7,6 +7,7 @@ não pode virar double no `JSON.parse` do navegador.
 
 import uuid
 from datetime import date as date_type
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
@@ -83,3 +84,13 @@ class DashboardSummaryRead(BaseModel):
     other_currency_count: int
     # Lançamento mais recente, ignorando o período. Ver `DashboardSummary`.
     latest_date: date_type | None
+
+    # Transferência entre contas próprias: fora de receita, despesa **e** de
+    # `transfer`. A categoria vai junto para a tela abrir o extrato dela.
+    own_transfer: KindTotalRead
+    own_transfer_category_id: uuid.UUID | None
+
+    # Saldo das contas BANK na última coleta — fotografia, não fluxo. `None` com
+    # filtro de cartão ou sem saldo reportado.
+    current_balance: Money | None
+    balance_updated_at: datetime | None

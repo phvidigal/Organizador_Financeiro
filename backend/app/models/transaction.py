@@ -10,6 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Enum,
     ForeignKey,
@@ -142,6 +143,22 @@ class Transaction(Base, TimestampMixin, SoftDeleteMixin):
     )
     category_confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     categorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Qual regra do titular decidiu a linha. NULL em `category_source = 'RULE'`
+    # significa a regra embutida de conta própria, que vem de
+    # `counterparty_is_holder` e não de `category_rules`.
+    category_rule_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("category_rules.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # --- Contraparte ---------------------------------------------------------
+    #
+    # "O outro lado é o próprio titular?" — calculado no sync comparando o CPF e o
+    # nome de `paymentData` com os do titular, **em memória**. Só o booleano é
+    # gravado: o documento não chega ao banco (ver `mappers.RAW_TRANSACTION_FIELDS`).
+    # NULL quando a origem não mandou `paymentData`.
+    counterparty_is_holder: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # --- Deduplicação de origens sem identificador ---------------------------
     #
@@ -231,3 +248,7 @@ Index(
 
 # Índice da FK de account_id, pelo mesmo motivo acima (CASCADE ao excluir a conta).
 Index("ix_transactions_account_id", Transaction.account_id)
+
+# Índice da FK de category_rule_id: desativar uma regra devolve à fila o que ela
+# decidiu, e sem índice isso seria seq scan.
+Index("ix_transactions_category_rule_id", Transaction.category_rule_id)
