@@ -5,12 +5,12 @@
 // régua para medir o acerto do LLM. Hoje há zero correções no banco, e por isso o
 // limiar `LOW_CONFIDENCE = 0.70` continua sem calibração.
 //
-// **Os dois motivos de revisão aparecem como fatos crus, não como veredito.** A
-// regra que manda uma linha para cá vive em `decide.decide`, no backend: confiança
-// abaixo do limiar **ou** discordância de raiz com a Pluggy. Reimplementá-la aqui
+// **Os motivos de revisão aparecem como fatos crus, não como veredito.** A regra
+// que manda uma linha para cá vive em `decide.decide`, no backend: confiança abaixo
+// do limiar, discordância de raiz com a Pluggy, ou uma escolha que **é** uma
+// pergunta ("Pix enviado", conta própria sem evidência). Reimplementá-la aqui
 // criaria uma segunda cópia que diverge da primeira sem ninguém notar — então a
-// tela mostra a confiança e o palpite do agregador lado a lado e deixa a leitura
-// com quem vai responder.
+// pergunta vem pronta do backend (`review_question`), e o resto são os números.
 
 import Link from "next/link";
 
@@ -18,6 +18,7 @@ import { CategoryPicker } from "@/components/category-picker";
 import { Nav } from "@/components/nav";
 import {
   type Account,
+  accountLabel,
   type Category,
   type CategorizationStatusRead,
   formatConfidence,
@@ -25,6 +26,7 @@ import {
   formatMoney,
   KIND_LABEL,
   type Page,
+  RULE_APPLIED_PARAM,
   serverFetch,
   type Transaction,
 } from "@/lib/api";
@@ -36,10 +38,11 @@ const PAGE_SIZE = 50;
 export default async function RevisaoPage({
   searchParams,
 }: {
-  searchParams: Promise<{ offset?: string }>;
+  searchParams: Promise<{ offset?: string; [RULE_APPLIED_PARAM]?: string }>;
 }) {
   const params = await searchParams;
   const offset = Math.max(0, Number(params.offset ?? 0) || 0);
+  const regraAplicada = params[RULE_APPLIED_PARAM];
 
   const query = new URLSearchParams({
     categorization_status: "NEEDS_REVIEW",
@@ -68,11 +71,7 @@ export default async function RevisaoPage({
   }
 
   const porId = new Map(categories.data.map((c) => [c.id, c]));
-  const nomeDaConta = new Map(
-    accounts.ok
-      ? accounts.data.map((a) => [a.id, a.type === "CREDIT" ? "cartão" : "conta"])
-      : [],
-  );
+  const contas = new Map(accounts.ok ? accounts.data.map((a) => [a.id, a]) : []);
 
   const { items, total } = page.data;
   const fim = Math.min(offset + PAGE_SIZE, total);
@@ -94,6 +93,14 @@ export default async function RevisaoPage({
           </>
         )}
       </p>
+
+      {regraAplicada !== undefined && (
+        <p className="notice">
+          Regra criada: {regraAplicada} outro(s) lançamento(s) com o mesmo trecho foram
+          categorizados junto, e os próximos não vão mais aparecer aqui. Veja em{" "}
+          <Link href="/regras">Regras</Link>.
+        </p>
+      )}
 
       {items.length === 0 ? (
         <p className="hint">
@@ -121,7 +128,7 @@ export default async function RevisaoPage({
                     <td className="nowrap">{formatDate(t.date)}</td>
                     <td>
                       {t.description_raw}
-                      <span className="muted"> · {nomeDaConta.get(t.account_id) ?? "—"}</span>
+                      <span className="muted"> · {accountLabel(contas.get(t.account_id))}</span>
                     </td>
                     <td
                       className={
@@ -141,6 +148,9 @@ export default async function RevisaoPage({
                       <span className="muted">{KIND_LABEL[t.kind]}</span>
                     </td>
                     <td className="muted">
+                      {t.review_question && (
+                        <span className="question">{t.review_question}</span>
+                      )}
                       confiança {formatConfidence(t.category_confidence)}
                       <br />
                       Pluggy: {t.pluggy_category_name ?? "—"}
@@ -151,6 +161,7 @@ export default async function RevisaoPage({
                         categories={categories.data}
                         currentCategoryId={t.category_id}
                         currentKind={t.kind}
+                        suggestedPattern={t.suggested_rule_pattern}
                         offerConfirm
                       />
                     </td>
@@ -178,7 +189,8 @@ export default async function RevisaoPage({
       <p className="hint">
         Confirmar uma sugestão conta tanto quanto corrigi-la: as duas viram resposta
         do titular, e é a comparação entre elas que diz se a confiança do modelo
-        significa alguma coisa.
+        significa alguma coisa. Marque “sempre assim” quando o mesmo trecho for se
+        repetir — o próximo lançamento com ele não passa mais por aqui.
       </p>
     </main>
   );

@@ -1,8 +1,9 @@
 // O dashboard: quanto entrou, quanto saiu e para onde foi, mês a mês.
 //
 // **Nenhum total é calculado aqui.** Tudo sai de `GET /dashboard/summary`, que
-// soma por `kind` e deixa `TRANSFER` de fora — pagamento de fatura e Pix entre
-// contas próprias não são gasto. O cliente só formata, e a única conta que faz é a
+// soma por `kind` e deixa `TRANSFER` de fora — pagamento de fatura e aplicação não
+// são gasto. A transferência entre contas próprias sai até do bloco de
+// transferências e vira uma nota. O cliente só formata, e a única conta que faz é a
 // proporção de cada categoria para desenhar a barra.
 //
 // **O número provisório é declarado, não escondido.** Linha que ainda espera o LLM
@@ -132,7 +133,20 @@ export default async function PainelPage({
   const { pending, needs_review, failed } = s.undecided;
   const semDecisao = pending + needs_review + failed;
   const vazio =
-    s.income.count + s.expense.count + s.transfer.count + s.other_currency_count === 0;
+    s.income.count +
+      s.expense.count +
+      s.transfer.count +
+      s.own_transfer.count +
+      s.other_currency_count ===
+    0;
+  const extratoDaContaPropria = s.own_transfer_category_id
+    ? `/transacoes?${new URLSearchParams({
+        category_id: s.own_transfer_category_id,
+        date_from: p.from,
+        date_to: p.to,
+        ...(accountId ? { account_id: accountId } : {}),
+      })}`
+    : null;
 
   return (
     <main className="wide">
@@ -178,6 +192,23 @@ export default async function PainelPage({
               <div className={"kpi " + classeDoValor(s.net)}>{formatMoney(s.net)}</div>
               <p className="muted">receitas menos despesas · transferências fora</p>
             </div>
+            {/* Fotografia, não fluxo: não fecha com o resultado do mês, e o texto diz
+                isso — num app de finanças "saldo" é o que está na conta, e a
+                comparação com o aplicativo do banco é inevitável. */}
+            {s.current_balance !== null && (
+              <div className="card">
+                <h2>Saldo em conta</h2>
+                <div className={"kpi " + classeDoValor(s.current_balance)}>
+                  {formatMoney(s.current_balance)}
+                </div>
+                <p className="muted">
+                  {accountId ? "nesta conta" : "nas contas correntes"}
+                  {s.balance_updated_at && <> · coleta de {formatDate(s.balance_updated_at)}</>}
+                  <br />
+                  agora, não no mês — cartão fora
+                </p>
+              </div>
+            )}
           </div>
 
           {semDecisao > 0 && (
@@ -220,25 +251,44 @@ export default async function PainelPage({
             accountId={accountId}
           />
 
-          {s.transfer.count > 0 && (
+          {(s.transfer.count > 0 || s.own_transfer.count > 0) && (
             <section>
               <h2 className="section">Fora dos totais</h2>
-              <p className="muted">
-                {s.transfer.count} transferência(s) — dinheiro que só mudou de lugar:
-                pagamento de fatura, Pix entre contas próprias, aplicação e resgate.
-                Entrou <span className="amount-positive">{formatMoney(s.transfer.inflow)}</span>
-                , saiu <span className="amount-negative">{formatMoney(s.transfer.outflow)}</span>.
-              </p>
-              <details>
-                <summary className="muted">ver por categoria</summary>
-                <Quebra
-                  kind="TRANSFER"
-                  raizes={s.transfer_by_category}
-                  total={null}
-                  periodo={p}
-                  accountId={accountId}
-                />
-              </details>
+              {s.transfer.count > 0 && (
+                <>
+                  <p className="muted">
+                    {s.transfer.count} transferência(s) — dinheiro que só mudou de lugar:
+                    pagamento de fatura, aplicação e resgate. Entrou{" "}
+                    <span className="amount-positive">{formatMoney(s.transfer.inflow)}</span>,
+                    saiu{" "}
+                    <span className="amount-negative">{formatMoney(s.transfer.outflow)}</span>.
+                  </p>
+                  <details>
+                    <summary className="muted">ver por categoria</summary>
+                    <Quebra
+                      kind="TRANSFER"
+                      raizes={s.transfer_by_category}
+                      total={null}
+                      periodo={p}
+                      accountId={accountId}
+                    />
+                  </details>
+                </>
+              )}
+              {s.own_transfer.count > 0 && (
+                <p className="muted">
+                  {s.own_transfer.count} transferência(s) entre suas contas não entram em
+                  nada — o dinheiro não saiu de casa. Saiu{" "}
+                  <span className="amount-negative">{formatMoney(s.own_transfer.outflow)}</span>
+                  , entrou{" "}
+                  <span className="amount-positive">{formatMoney(s.own_transfer.inflow)}</span>
+                  {s.own_transfer.undecided_count > 0 && (
+                    <> ({s.own_transfer.undecided_count} ainda sem decisão)</>
+                  )}
+                  .{" "}
+                  {extratoDaContaPropria && <Link href={extratoDaContaPropria}>ver quais</Link>}
+                </p>
+              )}
             </section>
           )}
         </>
