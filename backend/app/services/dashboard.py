@@ -16,6 +16,11 @@ quebra em silêncio:
    (invariante 4); deixá-la sem aviso daria um número errado com cara de certo.
    Por isso cada total vem com a parcela `undecided` ao lado.
 
+4. **Transferência entre contas próprias sai de tudo.** Nem receita, nem despesa,
+   nem o bloco de transferências: o dinheiro não saiu de casa. Vai para
+   `own_transfer`, que a tela mostra como uma nota. Pagamento de fatura e
+   aplicação continuam em `transfer` — esses o titular quer ver.
+
 A montagem (`summarize`) é pura e separada da consulta (`load_summary`) pelo
 mesmo motivo de `catalog.py`: é ela que precisa de teste, e testá-la não deveria
 exigir banco.
@@ -25,12 +30,14 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date as date_type
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import CategorizationStatus, TransactionKind
+from app.models.account import Account
+from app.models.enums import AccountType, CategorizationStatus, TransactionKind
 from app.models.transaction import Transaction
 from app.services.categorization.catalog import LABEL_SEPARATOR, CategoryCatalog, load_catalog
 
@@ -127,6 +134,9 @@ class Totals:
     transfer_by_category: list[RootTotal]
     undecided: UndecidedCounts
     other_currency_count: int
+    # Fora de tudo — regra 4. `inflow`/`outflow` são o que entrou e saiu das contas
+    # conectadas; com o outro lado fora da Pluggy, só uma das pontas aparece.
+    own_transfer: KindTotal = field(default_factory=KindTotal)
 
 
 @dataclass
@@ -139,6 +149,15 @@ class DashboardSummary(Totals):
     # tela vazia apontar para onde há dado — o sync no tier pessoal depende da
     # coleta da Pluggy, e o mês corrente pode simplesmente não ter chegado ainda.
     latest_date: date_type | None = None
+    # Quanto há nas contas **agora**, segundo a última coleta. É fotografia, não
+    # fluxo: ignora o período de propósito, e não fecha com `net` — o resultado do
+    # mês tira as transferências e conta a compra do cartão na data da compra.
+    #
+    # Só contas BANK: "saldo" de cartão é dívida, e somá-lo a dinheiro em conta daria
+    # um número sem significado. `None` quando o filtro é um cartão.
+    current_balance: Decimal | None = None
+    balance_updated_at: datetime | None = None
+    own_transfer_category_id: uuid.UUID | None = None
 
 
 def _bucket(
@@ -207,10 +226,26 @@ def summarize(rows: Iterable[AggregateRow], catalog: CategoryCatalog) -> Totals:
     per_kind: dict[str, list[AggregateRow]] = {kind.value: [] for kind in TransactionKind}
     undecided = UndecidedCounts()
     other_currency_count = 0
+    own_transfer = KindTotal()
+    own = catalog.own_transfer
 
     for row in rows:
         if row.currency_code != BASE_CURRENCY:
             other_currency_count += row.count
+            continue
+
+        if own is not None and row.kind == TransactionKind.TRANSFER and row.category_id == own.id:
+            # Regra 4. Só com `kind = TRANSFER`: a conta própria que o LLM sugeriu
+            # sem evidência fica com o `kind` do sinal até o titular confirmar, e
+            # continua nos totais — a pergunta está na revisão.
+            amount = row.inflow + row.outflow
+            own_transfer.total += amount
+            own_transfer.inflow += row.inflow
+            own_transfer.outflow += row.outflow
+            own_transfer.count += row.count
+            if row.categorization_status != CategorizationStatus.CATEGORIZED:
+                own_transfer.undecided_total += amount
+                own_transfer.undecided_count += row.count
             continue
 
         # Depois do filtro de moeda, de propósito: a tela diz que as linhas sem
@@ -246,6 +281,7 @@ def summarize(rows: Iterable[AggregateRow], catalog: CategoryCatalog) -> Totals:
         transfer_by_category=_breakdown(per_kind[TransactionKind.TRANSFER.value], catalog),
         undecided=undecided,
         other_currency_count=other_currency_count,
+        own_transfer=own_transfer,
     )
 
 
@@ -298,8 +334,10 @@ async def load_summary(
         for currency, kind, category_id, status, inflow, outflow, count in result
     ]
 
-    totals = summarize(rows, await load_catalog(session))
+    catalog = await load_catalog(session)
+    totals = summarize(rows, catalog)
     latest_date = await session.scalar(select(func.max(Transaction.date)).where(*filters))
+    current_balance, balance_updated_at = await _current_balance(session, account_id)
 
     return DashboardSummary(
         **vars(totals),
@@ -307,4 +345,37 @@ async def load_summary(
         date_to=date_to,
         account_id=account_id,
         latest_date=latest_date,
+        current_balance=current_balance,
+        balance_updated_at=balance_updated_at,
+        own_transfer_category_id=catalog.own_transfer.id if catalog.own_transfer else None,
     )
+
+
+async def _current_balance(
+    session: AsyncSession, account_id: uuid.UUID | None
+) -> tuple[Decimal | None, datetime | None]:
+    """Soma de `accounts.balance` das contas BANK em BRL, respeitando o filtro.
+
+    `None` quando não há conta BANK no recorte — o filtro é um cartão, ou a
+    instituição não reportou saldo. Zero seria uma afirmação ("não há dinheiro"),
+    e não é o que se sabe.
+    """
+    conditions = [
+        Account.type == AccountType.BANK.value,
+        Account.currency_code == BASE_CURRENCY,
+        Account.balance.is_not(None),
+        Account.deleted_at.is_(None),
+    ]
+    if account_id is not None:
+        conditions.append(Account.id == account_id)
+
+    total, updated_at, count = (
+        await session.execute(
+            select(func.sum(Account.balance), func.max(Account.updated_at), func.count()).where(
+                *conditions
+            )
+        )
+    ).one()
+    if not count:
+        return None, None
+    return total, updated_at

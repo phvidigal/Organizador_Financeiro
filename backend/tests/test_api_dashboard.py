@@ -255,3 +255,72 @@ async def test_empty_period_is_zero_not_error(api, tenants):
     assert body["net"] == "0.00"
     assert body["expense_by_category"] == []
     assert body["latest_date"] is None
+
+
+async def test_current_balance_is_bank_only_and_ignores_the_period(
+    api, tenants, account_a, admin_session
+):
+    """Saldo é fotografia: vem de `accounts.balance`, não do período. Cartão fica de
+    fora — o "saldo" dele é dívida — e com filtro de cartão a resposta é `None`."""
+    card = await create_account(admin_session, TENANT_A, "Cartão")
+    await admin_session.execute(
+        text("UPDATE accounts SET balance = :b WHERE id = :id"),
+        {"b": Decimal("152.32"), "id": str(account_a)},
+    )
+    await admin_session.execute(
+        text("UPDATE accounts SET balance = :b WHERE id = :id"),
+        {"b": Decimal("-7915.55"), "id": str(card)},
+    )
+    await admin_session.commit()
+
+    async with api() as client:
+        everything = (await client.get("/dashboard/summary", params=AUGUST)).json()
+        only_card = (
+            await client.get("/dashboard/summary", params={**AUGUST, "account_id": str(card)})
+        ).json()
+        another_month = (
+            await client.get(
+                "/dashboard/summary", params={"date_from": "2025-01-01", "date_to": "2025-01-31"}
+            )
+        ).json()
+
+    assert everything["current_balance"] == "152.32"
+    assert everything["balance_updated_at"] is not None
+    assert another_month["current_balance"] == "152.32"
+    assert only_card["current_balance"] is None
+
+
+async def test_own_transfer_comes_apart_with_its_category(
+    api, tenants, account_a, admin_session, app_tenant_session
+):
+    tenant_a, _ = tenants
+    transf, propria = uuid.uuid4(), uuid.uuid4()
+    await admin_session.execute(
+        text(
+            "INSERT INTO categories (id, tenant_id, parent_id, name, kind) VALUES "
+            "(:t, :tenant, NULL, 'Transferências', 'TRANSFER'), "
+            "(:p, :tenant, :t, 'Transferência entre contas próprias', 'TRANSFER')"
+        ),
+        {"t": str(transf), "p": str(propria), "tenant": str(tenant_a)},
+    )
+    await admin_session.commit()
+    ids = await seed(
+        app_tenant_session, TENANT_A, account_a, [("propria", "-2000.00", date(2026, 8, 10))]
+    )
+    async with app_tenant_session(TENANT_A) as session:
+        await apply_decision(
+            session,
+            transaction_id=ids["propria"],
+            decision=Decision(
+                status=CategorizationStatus.CATEGORIZED, category_id=propria, kind="TRANSFER"
+            ),
+        )
+
+    async with api() as client:
+        body = (await client.get("/dashboard/summary", params=AUGUST)).json()
+
+    assert body["own_transfer"]["count"] == 1
+    assert body["own_transfer"]["outflow"] == "-2000.00"
+    assert body["own_transfer_category_id"] == str(propria)
+    assert body["transfer"]["count"] == 0
+    assert body["expense"]["count"] == 0

@@ -212,3 +212,57 @@ def test_empty_period():
     assert totals.net == Decimal("0")
     assert totals.expense_by_category == []
     assert totals.income.count == 0
+
+
+# --- Transferência entre contas próprias: fora de tudo -----------------------
+
+CONTA_PROPRIA = uuid.UUID("00000000-0000-0000-0000-0000000000b3")
+
+
+def catalog_with_own_transfer():
+    rows = [
+        CategoryRow(TRANSFERENCIAS, None, "Transferências", "TRANSFER"),
+        CategoryRow(PAGAMENTO_CARTAO, TRANSFERENCIAS, "Pagamento de cartão", "TRANSFER"),
+        CategoryRow(
+            CONTA_PROPRIA, TRANSFERENCIAS, "Transferência entre contas próprias", "TRANSFER"
+        ),
+        CategoryRow(RECEITAS, None, "Receitas", "INCOME"),
+    ]
+    return build_catalog(rows)
+
+
+def test_own_transfer_leaves_income_expense_and_the_transfer_block():
+    """O dinheiro não saiu de casa: nem receita, nem despesa, nem o "entrou X, saiu
+    Y" de transferências. Pagamento de fatura continua lá — esse o titular quer ver."""
+    totals = summarize(
+        [
+            row("TRANSFER", CONTA_PROPRIA, outflow="-2000.00"),
+            row("TRANSFER", CONTA_PROPRIA, inflow="300.00", status="NEEDS_REVIEW"),
+            row("TRANSFER", PAGAMENTO_CARTAO, outflow="-900.00"),
+        ],
+        catalog_with_own_transfer(),
+    )
+
+    assert totals.own_transfer.count == 2
+    assert totals.own_transfer.outflow == Decimal("-2000.00")
+    assert totals.own_transfer.inflow == Decimal("300.00")
+    assert totals.own_transfer.undecided_count == 1
+
+    assert totals.transfer.count == 1
+    assert totals.transfer.outflow == Decimal("-900.00")
+    labels = [c.label for root in totals.transfer_by_category for c in root.children]
+    assert labels == ["Transferências > Pagamento de cartão"]
+    assert totals.net == Decimal("0")
+
+
+def test_own_transfer_guess_without_evidence_stays_in_the_totals():
+    """A sugestão do LLM sem evidência mantém o `kind` do sinal até o titular
+    responder — e um Pix recebido assim continua contando como receita."""
+    totals = summarize(
+        [row("INCOME", CONTA_PROPRIA, inflow="500.00", status="NEEDS_REVIEW")],
+        catalog_with_own_transfer(),
+    )
+
+    assert totals.own_transfer.count == 0
+    assert totals.income.total == Decimal("500.00")
+    assert totals.income.undecided_count == 1
