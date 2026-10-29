@@ -386,6 +386,25 @@ async def test_ollama_down_from_the_start_marks_nothing_as_failed(
     assert pending == 4
 
 
+async def test_a_short_backlog_with_the_ollama_down_is_not_success(
+    tenants, account_a, categories_a, app_tenant_session
+) -> None:
+    """Uma linha só, Ollama fora do ar: não chega às três falhas seguidas que abortam
+    a execução — e mesmo assim não pode terminar SUCCESS com a linha parada."""
+    tenant_a, _ = tenants
+    await seed_transactions(
+        app_tenant_session, tenant_a, account_a, [("S1", "IFD*IFOOD", Decimal("-10.00"), None)]
+    )
+
+    outcome = await categorize_pending(
+        tenant_id=tenant_a, client=FakeOllama({}, fail_from=1), session_scope=app_tenant_session
+    )
+
+    assert outcome.status == "PARTIAL"
+    assert outcome.processed == 0
+    assert any("Ollama indisponível" in warning for warning in outcome.warnings)
+
+
 async def test_unusable_answer_goes_to_review_and_the_run_continues(
     tenants, account_a, categories_a, app_tenant_session, monkeypatch
 ) -> None:

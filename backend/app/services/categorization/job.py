@@ -241,6 +241,14 @@ async def categorize_pending(
 
         if outcome.failed:
             outcome.status = "PARTIAL"
+        if stuck_ids:
+            # Menos falhas seguidas que o limite — um backlog de uma ou duas linhas
+            # com o Ollama fora do ar nunca chega a três. Sem isto, a execução
+            # terminava SUCCESS com a linha parada na fila e nenhum aviso.
+            outcome.status = "PARTIAL"
+            outcome.warnings.append(
+                f"{len(stuck_ids)} transação(ões) continuam na fila: Ollama indisponível"
+            )
         outcome.finished_at = now()
         return outcome
 
