@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.models.enums import CategorizationStatus
-from app.services.categorization.catalog import CategoryCatalog
+from app.services.categorization.catalog import CategoryCatalog, CategoryEntry
 from app.services.categorization.prompt import Answer
 
 # Abaixo disto, revisão humana. Constante de módulo e não variável de ambiente, no
@@ -33,6 +33,12 @@ from app.services.categorization.prompt import Answer
 # 0.70 é um ponto de partida declaradamente arbitrário. O número honesto só sai
 # depois da Fase 4, comparando estas previsões com as correções do usuário.
 LOW_CONFIDENCE = Decimal("0.70")
+
+# As perguntas que só o titular responde. Escolher uma destas categorias **é** o
+# modelo dizendo "não tenho como saber" — por isso a linha vai para a revisão com
+# qualquer confiança, e o texto é o que a tela mostra (`question_for`).
+PIX_SENT_QUESTION = "Com o que foi gasto este Pix?"
+OWN_TRANSFER_QUESTION = "Esta transferência foi entre contas suas?"
 
 
 @dataclass(frozen=True)
@@ -47,7 +53,54 @@ class Decision:
     reason: str | None = None
 
 
-def decide(answer: Answer, *, catalog: CategoryCatalog, pluggy_category_id: str | None) -> Decision:
+def _question(
+    entry: CategoryEntry | None,
+    *,
+    catalog: CategoryCatalog,
+    counterparty_is_holder: bool | None,
+) -> str | None:
+    """A pergunta que a escolha desta categoria representa, se for uma.
+
+    Fonte única das duas regras: `decide` as usa para mandar a linha à revisão, e
+    `question_for` para a tela dizer o que está sendo perguntado.
+    """
+    if entry is None:
+        return None
+    pix_sent = catalog.pix_sent
+    if pix_sent is not None and entry.id == pix_sent.id:
+        return PIX_SENT_QUESTION
+    own = catalog.own_transfer
+    if own is not None and entry.id == own.id and counterparty_is_holder is not True:
+        # Sem evidência, "entre contas próprias" é palpite — e um palpite que tira o
+        # valor de todos os totais. Só a evidência decide sozinha.
+        return OWN_TRANSFER_QUESTION
+    return None
+
+
+def question_for(
+    *,
+    status: str,
+    category_id: uuid.UUID | None,
+    counterparty_is_holder: bool | None,
+    catalog: CategoryCatalog,
+) -> str | None:
+    """O que a revisão pergunta ao titular sobre esta linha. `None` fora da fila."""
+    if status != CategorizationStatus.NEEDS_REVIEW or category_id is None:
+        return None
+    return _question(
+        catalog.by_id.get(category_id),
+        catalog=catalog,
+        counterparty_is_holder=counterparty_is_holder,
+    )
+
+
+def decide(
+    answer: Answer,
+    *,
+    catalog: CategoryCatalog,
+    pluggy_category_id: str | None,
+    counterparty_is_holder: bool | None = None,
+) -> Decision:
     """Traduz a resposta do modelo na decisão de gravação."""
     entry = catalog.resolve(answer.category)
 
@@ -59,6 +112,21 @@ def decide(answer: Answer, *, catalog: CategoryCatalog, pluggy_category_id: str 
             status=CategorizationStatus.NEEDS_REVIEW,
             confidence=answer.confidence,
             reason=f"categoria fora da taxonomia: {answer.category!r}",
+        )
+
+    question = _question(entry, catalog=catalog, counterparty_is_holder=counterparty_is_holder)
+    if question is not None:
+        own = catalog.own_transfer
+        return Decision(
+            status=CategorizationStatus.NEEDS_REVIEW,
+            category_id=entry.id,
+            # Conta própria sem evidência mantém o `kind` do sinal (`None` = não
+            # mexa): até o titular confirmar, o valor continua nos totais — o erro
+            # oposto esconderia receita ou gasto real (invariante 4). O Pix enviado
+            # herda EXPENSE normalmente.
+            kind=None if own is not None and entry.id == own.id else entry.kind,
+            confidence=answer.confidence,
+            reason=f"pergunta ao titular: {question}",
         )
 
     if answer.confidence is None or answer.confidence < LOW_CONFIDENCE:

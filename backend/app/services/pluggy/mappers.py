@@ -11,7 +11,6 @@ que `app/services/ingestion.py` e `app/services/accounts.py` consomem.
 """
 
 import re
-import unicodedata
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
+from app.core.text import fold
 from app.models.enums import (
     AccountSubtype,
     AccountType,
@@ -185,7 +185,6 @@ def minimize_raw_payload(tx: dict[str, Any]) -> dict[str, Any]:
 # nem o do titular, que `map_account` também não copia.
 
 _NON_DIGITS = re.compile(r"\D")
-_SPACES = re.compile(r"\s+")
 
 
 def _digits(value: Any) -> str | None:
@@ -195,19 +194,10 @@ def _digits(value: Any) -> str | None:
     return digits or None
 
 
-def normalize_person_name(value: Any) -> str | None:
-    """Caixa alta, sem acento, espaços colapsados: "José  da Silva" → "JOSE DA SILVA".
-
-    Sem acento porque a mesma pessoa chega com e sem ele conforme o banco do outro
-    lado — e uma diferença de `É` para `E` não pode transformar transferência
-    própria em receita.
-    """
-    if not isinstance(value, str):
-        return None
-    decomposed = unicodedata.normalize("NFKD", value)
-    without_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    name = _SPACES.sub(" ", without_marks).strip().upper()
-    return name or None
+# Nome sem acento e em caixa alta: a mesma pessoa chega com e sem acento conforme
+# o banco do outro lado, e uma diferença de `É` para `E` não pode transformar
+# transferência própria em receita.
+normalize_person_name = fold
 
 
 @dataclass(frozen=True, repr=False)

@@ -31,6 +31,18 @@ logger = logging.getLogger(__name__)
 
 LABEL_SEPARATOR = " > "
 
+# As duas categorias que o código conhece pelo nome, num lugar só.
+#
+# A primeira é para onde vai a transferência entre contas próprias — por evidência
+# (`counterparty_is_holder`), e não por palpite —, e é a que o painel tira de todos
+# os totais. A segunda é a pergunta "com o que foi gasto este Pix?": toda escolha
+# dela vai para a revisão (`decide.decide`).
+#
+# Renomear uma das duas na taxonomia desliga o comportamento em silêncio; por isso
+# `tests/test_categorization_pure.py` confere que o seed as contém.
+OWN_TRANSFER_LABEL = "Transferências > Transferência entre contas próprias"
+PIX_SENT_LABEL = "Outros > Pix enviado"
+
 
 @dataclass(frozen=True)
 class CategoryRow:
@@ -85,6 +97,14 @@ class CategoryCatalog:
             return entry
         normalized = label.strip().casefold()
         return next((e for e in self.entries if e.label.casefold() == normalized), None)
+
+    @property
+    def own_transfer(self) -> CategoryEntry | None:
+        return self.by_label.get(OWN_TRANSFER_LABEL)
+
+    @property
+    def pix_sent(self) -> CategoryEntry | None:
+        return self.by_label.get(PIX_SENT_LABEL)
 
     def pluggy_counterpart(self, pluggy_category_id: str | None) -> CategoryEntry | None:
         """A nossa categoria equivalente ao palpite da Pluggy, se houver de/para."""

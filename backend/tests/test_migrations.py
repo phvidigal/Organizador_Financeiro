@@ -124,6 +124,27 @@ async def test_seed_creates_default_tenant_and_categories(admin_session) -> None
     assert unmapped == 0
 
 
+async def test_seed_has_the_categories_the_code_knows_by_name(admin_session) -> None:
+    """`OWN_TRANSFER_LABEL` e `PIX_SENT_LABEL` existem no seed, com o `kind` certo.
+
+    Renomear uma delas na taxonomia desligaria a conta própria e a pergunta do Pix
+    sem erro nenhum — o job só registraria um aviso.
+    """
+    from app.services.categorization.catalog import OWN_TRANSFER_LABEL, PIX_SENT_LABEL
+
+    rows = await admin_session.execute(
+        text(
+            "SELECT p.name || ' > ' || c.name, c.kind FROM categories c "
+            "JOIN categories p ON p.id = c.parent_id "
+            "WHERE c.tenant_id = '00000000-0000-0000-0000-000000000001'"
+        )
+    )
+    by_label = dict(rows.all())
+
+    assert by_label[OWN_TRANSFER_LABEL] == "TRANSFER"
+    assert by_label[PIX_SENT_LABEL] == "EXPENSE"
+
+
 async def test_investment_tree_is_transfer_not_expense(admin_session) -> None:
     """Aplicar não é gastar, resgatar não é receber.
 

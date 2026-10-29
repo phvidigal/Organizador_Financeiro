@@ -31,7 +31,11 @@ from app.core.tenancy import TenantSessionScope, tenant_session
 from app.models.account import Account
 from app.models.enums import CategorizationStatus
 from app.models.transaction import Transaction
-from app.services.categorization.catalog import load_catalog
+from app.services.categorization.catalog import (
+    OWN_TRANSFER_LABEL,
+    CategoryCatalog,
+    load_catalog,
+)
 from app.services.categorization.client import OllamaClient
 from app.services.categorization.decide import Decision, decide
 from app.services.categorization.errors import (
@@ -42,9 +46,11 @@ from app.services.categorization.prompt import (
     TransactionForPrompt,
     build_messages,
     build_schema,
+    describe_counterparty,
     parse_response,
 )
-from app.services.categorization.store import apply_decision
+from app.services.categorization.rules import apply_rules, load_active_rules
+from app.services.categorization.store import apply_decision, apply_own_transfer_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +86,13 @@ class CategorizationOutcome:
     categorized: int = 0
     needs_review: int = 0
     failed: int = 0
+    # Decididas antes do LLM, sem gastar GPU: pela evidência de conta própria ou
+    # por uma regra do titular. Não entram em `processed`, que conta chamadas ao
+    # modelo e é o que o `limit` limita.
+    by_rule: int = 0
+    # Linhas que a regra de conta própria tinha decidido e voltaram para a fila
+    # porque a evidência sumiu.
+    returned_to_queue: int = 0
     error: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -119,6 +132,12 @@ async def categorize_pending(
             return outcome
 
         schema = build_schema(catalog.labels)
+
+        # Antes do LLM, o que não precisa dele. Numa unidade de trabalho própria e
+        # sem HTTP, como o resto do job.
+        phase = "aplicar regras"
+        async with session_scope(tenant_id) as session:
+            await _apply_rules(session, catalog=catalog, outcome=outcome, now=now())
 
         # Linhas que continuam PENDING de propósito (Ollama fora do ar no meio da
         # execução). Sem excluí-las da consulta, a próxima página traria as mesmas.
@@ -162,6 +181,7 @@ async def categorize_pending(
                         parse_response(content),
                         catalog=catalog,
                         pluggy_category_id=tx.pluggy_category_id,
+                        counterparty_is_holder=tx.counterparty_is_holder,
                     )
                     consecutive_failures = 0
 
@@ -237,6 +257,39 @@ async def categorize_pending(
         return outcome
 
 
+async def _apply_rules(
+    session: AsyncSession,
+    *,
+    catalog: CategoryCatalog,
+    outcome: CategorizationOutcome,
+    now: datetime,
+) -> None:
+    """O passo de regras, na ordem da precedência.
+
+    1. **Evidência de conta própria**, sobre o histórico inteiro e não só a fila:
+       é ela que corrige o `Pix recebido` do próprio titular que o LLM mandou para
+       Receitas antes de a evidência existir. Devolve à fila o que perdeu a evidência.
+    2. **Regras do titular**, só sobre o que ainda não tem decisão. A regra nova já
+       foi aplicada ao histórico quando foi criada (`PATCH /transactions/{id}`).
+
+    O que sobrar `PENDING` segue para o LLM.
+    """
+    own = catalog.own_transfer
+    if own is None:
+        outcome.warnings.append(
+            f"categoria {OWN_TRANSFER_LABEL!r} não encontrada; "
+            "transferência entre contas próprias não será reconhecida"
+        )
+    else:
+        promoted, demoted = await apply_own_transfer_evidence(session, category=own, now=now)
+        outcome.by_rule += promoted
+        outcome.returned_to_queue += demoted
+
+    outcome.by_rule += await apply_rules(
+        session, rules=await load_active_rules(session), catalog=catalog, include_llm=False, now=now
+    )
+
+
 def _count(outcome: CategorizationOutcome, decision: Decision) -> None:
     if decision.status == CategorizationStatus.CATEGORIZED:
         outcome.categorized += 1
@@ -268,6 +321,10 @@ async def _next_page(
             Transaction.merchant,
             Transaction.pluggy_category_id,
             Transaction.pluggy_category_name,
+            Transaction.counterparty_is_holder,
+            # Só o bloco que sobreviveu à minimização: meio de pagamento e o tipo de
+            # documento de cada ponta (`mappers.minimize_raw_payload`).
+            Transaction.raw_payload["paymentData"].label("payment_data"),
             Account.type.label("account_type"),
         )
         .join(Account, Account.id == Transaction.account_id, isouter=True)
@@ -293,6 +350,10 @@ async def _next_page(
             pluggy_category_id=row.pluggy_category_id,
             pluggy_category_name=row.pluggy_category_name,
             account_type=row.account_type,
+            counterparty=describe_counterparty(
+                row.amount, row.counterparty_is_holder, row.payment_data
+            ),
+            counterparty_is_holder=row.counterparty_is_holder,
         )
         for row in result
     ]
