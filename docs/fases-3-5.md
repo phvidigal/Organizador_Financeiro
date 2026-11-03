@@ -402,9 +402,9 @@ não plano:
 - **Limite que fica:** `description_raw` costuma trazer o nome do remetente
   ("PIX RECEBIDO FULANO"). É o insumo do LLM e não tem como sair sem perder a
   categorização. Se a Fase 5 criptografar algo, é por aqui que começa.
-- **Acesso só local, por construção.** Portas em `127.0.0.1`, `Host` validado no
-  backend e no Next, escrita de outra origem recusada, e o backend se recusa a
-  subir com host de rede configurado. Autenticação continua ⚠️ — e passa a ser
+- **Acesso só local, por construção.** Portas em `127.0.0.1` (o banco, sem porta
+  no host), `Host` validado no backend e no Next, escrita de outra origem
+  recusada, e o backend se recusa a subir com host de rede configurado. Autenticação continua ⚠️ — e passa a ser
   pré-requisito explícito para qualquer acesso de fora da máquina.
 
 ### O que realmente precisa de criptografia

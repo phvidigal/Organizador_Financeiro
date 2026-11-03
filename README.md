@@ -87,9 +87,9 @@ não sobe custa dez minutos, isolamento desligado em silêncio pode levar meses
 para ser notado.
 
 **Só local, porque não há login.** Sem autenticação, quem alcança a API lê o
-extrato inteiro. As portas escutam só em `127.0.0.1`; o backend e o Next recusam
-`Host` que não seja a própria máquina, o que barra DNS rebinding; escrita vinda de
-outra origem é recusada, o que barra CSRF. E o backend se recusa a subir se
+extrato inteiro. As portas escutam só em `127.0.0.1`, e o banco nem é publicado
+no host; o backend e o Next recusam `Host` que não seja a própria máquina, o que
+barra DNS rebinding; escrita vinda de outra origem é recusada, o que barra CSRF. E o backend se recusa a subir se
 alguém configurar um host de rede — abrir o app para o celular passa,
 obrigatoriamente, por implementar login antes.
 
