@@ -9,12 +9,14 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-finance}
       APP_DB_USER: ${APP_DB_USER:-app_user}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:-app_user}
-    ports:
-      # Só no loopback, como as outras duas portas: sem o `127.0.0.1:` o Docker
-      # publica em todas as interfaces, e qualquer aparelho da rede local entraria
-      # no Postgres como superusuário. Um cliente SQL no próprio host continua
-      # funcionando. Abrir para a rede exige autenticação antes (ver CLAUDE.md).
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    # Sem `ports`, de propósito: o banco não é publicado no host. Backend,
+    # migrations e testes o alcançam pela rede interna do compose (`db:5432`), e o
+    # `psql` é `docker compose exec db psql`. Publicar a porta só abria o
+    # superusuário para qualquer processo da máquina — e no Windows ainda esbarra
+    # nas faixas que o Hyper-V reserva (`bind: ... forbidden by its access
+    # permissions`), que derrubou o primeiro `up` com a porta em 127.0.0.1.
+    # Precisa de um cliente SQL gráfico no host? Publique numa porta livre, sempre
+    # com `127.0.0.1:` na frente (ver CLAUDE.md, invariante 6).
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Cria o role app_user no primeiro boot (ver o cabeçalho do script).

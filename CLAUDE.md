@@ -119,9 +119,11 @@ Quem alcança a API lê e altera o extrato inteiro. Enquanto não houver
 autenticação, quatro regras mantêm esse "quem" restrito ao titular, na própria
 máquina — e quebrar qualquer uma delas abre o extrato sem erro nenhum:
 
-- **Porta só em `127.0.0.1`** (`docker-compose.yml`). Sem o prefixo, o Docker
-  publica em todas as interfaces e o Wi-Fi inteiro entra — no Postgres, como
-  superusuário.
+- **Porta só em `127.0.0.1`, e o banco sem porta nenhuma** (`docker-compose.yml`).
+  Sem o prefixo, o Docker publica em todas as interfaces e o Wi-Fi inteiro entra.
+  O Postgres não é publicado: tudo o alcança por `db:5432`, na rede do compose.
+  Publicá-lo abriria o superusuário — e no Windows ainda esbarra nas faixas de
+  porta que o Hyper-V reserva.
 - **`Host` local** (`TrustedHostMiddleware` no backend com `Settings.allowed_hosts`;
   `frontend/src/middleware.ts` no Next). É o que barra DNS rebinding.
   `Settings._hosts_are_local` **recusa subir** com host de fora da máquina: abrir

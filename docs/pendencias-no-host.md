@@ -98,6 +98,9 @@ docker compose exec backend alembic upgrade head
   usa volume nomeado (`pgdata`) e não é tocado.
 - A migration `0006` tira nome, CPF/CNPJ e conta de terceiros do `raw_payload` já
   gravado. É **irreversível**, de propósito.
+- Se o `up` parar em `ports are not available: ... 127.0.0.1:5432 ... forbidden
+  by its access permissions`, o código ainda é o anterior a esta correção: o banco
+  deixou de publicar porta no host. `git pull` de novo e repita.
 
 **Conferir que nada mais escuta na rede** (PowerShell ou cmd):
 
@@ -105,14 +108,16 @@ docker compose exec backend alembic upgrade head
 netstat -ano | findstr ":3000 :8000 :5432 :11434"
 ```
 
-Toda linha `LISTENING` tem de mostrar `127.0.0.1`. Se a do `11434` (Ollama)
+Toda linha `LISTENING` da 3000 e da 8000 tem de mostrar `127.0.0.1`. A 5432 não
+deve aparecer: o banco não é mais publicado no host — se aparecer, é outro
+programa do Windows (um Postgres instalado à parte, por exemplo). Se a do `11434` (Ollama)
 mostrar `0.0.0.0`, ele está aberto para a rede: é configuração do Ollama no
 Windows (`OLLAMA_HOST`), fora deste repositório, e o container o alcança por
 `host.docker.internal` mesmo sem isso — confirme com `GET /health/ollama` depois
 de fechar.
 
-**Recomendado — trocar as senhas do banco.** As portas já não saem da máquina,
-mas o `postgres` é superusuário e qualquer processo local o alcança. O volume já
+**Recomendado — trocar as senhas do banco.** O banco já não tem porta no host,
+mas o `postgres` é superusuário e a senha padrão é a do exemplo. O volume já
 existe, então trocar no `.env` não basta:
 
 ```bash
